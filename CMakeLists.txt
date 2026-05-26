@@ -13,93 +13,190 @@
 # You should have received a copy of the GNU General Public License
 # along with qawno. If not, see <http://www.gnu.org/licenses/>.
 
-cmake_minimum_required(VERSION 3.0)
-cmake_policy(SET CMP0048 NEW)
+cmake_minimum_required(VERSION 3.16)
 
-project(Qawno VERSION 1.0.0 LANGUAGES CXX)
+project(Qawno VERSION 2.0.0 LANGUAGES CXX)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 list(APPEND
      CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-find_package(Qt5 COMPONENTS Core Widgets REQUIRED)
+# Build against whichever Qt is installed: Qt6 is preferred, Qt5 still works.
+# Svg lets QIcon render the toolbar's .svg icons (pulls in the qsvg image
+# plugin and lets macdeployqt bundle it).
+find_package(QT NAMES Qt6 Qt5 COMPONENTS Core Widgets Svg Network REQUIRED)
+find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Core Widgets Svg Network REQUIRED)
+
+# Qt6 moved QTextCodec (needed for Windows-1251 scripts) into Core5Compat.
+if(QT_VERSION_MAJOR EQUAL 6)
+  find_package(Qt6 COMPONENTS Core5Compat REQUIRED)
+endif()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR
-   CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-endif()
+# Qt6 requires C++17; Qt5 is happy with it too.
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
+# The .ui files wire actions to slots resolved at runtime. Qt6's uic defaults
+# to compile-time pointer-to-member connections, which fail to build. Emit
+# string-based connections (Qt5 behaviour) instead.
+set(CMAKE_AUTOUIC_OPTIONS --connections string)
+
 configure_file(qawno.h.in qawno.h @ONLY)
+
+# Telemetry: events POST to a Supabase Edge Function that holds the DB key
+# server-side, so no key is baked into the binary. A default function URL is
+# compiled into TelemetryClient.cpp; override it with QAWNO_TELEMETRY_URL in
+# cmake/Telemetry.env (gitignored) for staging/dev endpoints.
+set(QAWNO_TELEMETRY_ENV "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Telemetry.env")
+if(EXISTS "${QAWNO_TELEMETRY_ENV}")
+  file(STRINGS "${QAWNO_TELEMETRY_ENV}" _telemetry_lines)
+  foreach(_line IN LISTS _telemetry_lines)
+    if(_line MATCHES "^QAWNO_TELEMETRY_URL=(.+)$")
+      add_compile_definitions(QAWNO_TELEMETRY_URL="${CMAKE_MATCH_1}")
+    endif()
+  endforeach()
+endif()
 
 set(HEADERS
   src/AboutDialog.h
   src/Compiler.h
   src/CompilerSettingsDialog.h
   src/ServerSettingsDialog.h
+  src/SettingsDialog.h
+  src/IosToggle.h
   src/EditorWidget.h
   src/FindDialog.h
   src/GoToDialog.h
   src/MainWindow.h
   src/OutputWidget.h
-  src/ReplaceDialog.h
   src/Server.h
   src/StatusBar.h
   src/SyntaxHighlighter.h
+  src/UpdateChecker.h
+  src/UpdatePromptDialog.h
+  src/Installer.h
+  src/WineManager.h
+  src/Spinner.h
+  src/IconLoader.h
+  src/LocaleManager.h
+  src/TelemetryClient.h
+  src/ConsentDialog.h
 )
 
 set(SOURCES
   src/AboutDialog.cpp
   src/Compiler.cpp
   src/CompilerSettingsDialog.cpp
+  src/CrossOver.cpp
   src/ServerSettingsDialog.cpp
+  src/SettingsDialog.cpp
+  src/IosToggle.cpp
   src/EditorWidget.cpp
   src/FindDialog.cpp
   src/GoToDialog.cpp
   src/main.cpp
   src/MainWindow.cpp
   src/OutputWidget.cpp
-  src/ReplaceDialog.cpp
   src/Server.cpp
   src/StatusBar.cpp
   src/SyntaxHighlighter.cpp
-  qawno.rc
+  src/UpdateChecker.cpp
+  src/UpdatePromptDialog.cpp
+  src/Installer.cpp
+  src/WineManager.cpp
+  src/Spinner.cpp
+  src/IconLoader.cpp
+  src/LocaleManager.cpp
+  src/TelemetryClient.cpp
+  src/ConsentDialog.cpp
 )
+
+# qawno.rc is a Windows resource script (the .exe icon); it must not be fed to
+# the compiler on other platforms.
+if(WIN32)
+  list(APPEND SOURCES qawno.rc)
+endif()
 
 set(UI_SOURCES
-  src/AboutDialog.ui
   src/CompilerSettingsDialog.ui
   src/ServerSettingsDialog.ui
-  src/FindDialog.ui
   src/GoToDialog.ui
   src/MainWindow.ui
-  src/ReplaceDialog.ui
 )
 
-qt5_wrap_ui(UI_HEADERS ${UI_SOURCES})
-qt5_add_resources(EMBEDDED_RESOURCES qawno.qrc)
+qt_wrap_ui(UI_HEADERS ${UI_SOURCES} OPTIONS --connections string)
+qt_add_resources(EMBEDDED_RESOURCES qawno.qrc)
+
+# Translations: compile each .ts → .qm into the build dir, then bundle them
+# via a generated qrc so LocaleManager can load ":/i18n/qawno_<code>.qm".
+file(GLOB TS_FILES "${CMAKE_CURRENT_SOURCE_DIR}/i18n/qawno_*.ts")
+if(TS_FILES)
+  # lrelease ships in the same bin dir as qmake — derive from Qt6::qmake's
+  # imported location to avoid relying on PATH.
+  get_target_property(_qmake_loc Qt${QT_VERSION_MAJOR}::qmake IMPORTED_LOCATION)
+  get_filename_component(_qt_bin "${_qmake_loc}" DIRECTORY)
+  find_program(LRELEASE_EXECUTABLE lrelease HINTS "${_qt_bin}" REQUIRED)
+  set(QM_FILES "")
+  set(QM_RESOURCE_LIST "")
+  foreach(_ts ${TS_FILES})
+    get_filename_component(_base "${_ts}" NAME_WE)
+    set(_qm "${CMAKE_CURRENT_BINARY_DIR}/${_base}.qm")
+    add_custom_command(
+      OUTPUT "${_qm}"
+      COMMAND "${LRELEASE_EXECUTABLE}" -silent "${_ts}" -qm "${_qm}"
+      DEPENDS "${_ts}"
+      COMMENT "Compiling translation ${_base}.qm"
+      VERBATIM
+    )
+    list(APPEND QM_FILES "${_qm}")
+    list(APPEND QM_RESOURCE_LIST "    <file alias=\"i18n/${_base}.qm\">${_qm}</file>")
+  endforeach()
+  string(REPLACE ";" "\n" QM_RESOURCE_BODY "${QM_RESOURCE_LIST}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/qawno_i18n.qrc"
+       "<RCC>\n  <qresource>\n${QM_RESOURCE_BODY}\n  </qresource>\n</RCC>\n")
+  qt_add_resources(I18N_RESOURCES "${CMAKE_CURRENT_BINARY_DIR}/qawno_i18n.qrc")
+  list(APPEND EMBEDDED_RESOURCES ${I18N_RESOURCES})
+  add_custom_target(qawno_translations ALL DEPENDS ${QM_FILES})
+endif()
 
 if(APPLE)
-  set(ICON_IMAGES_PATTERN
-      "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/icon_*x*.png")
+  # Assemble a .iconset with the names iconutil expects, then convert to .icns.
+  # iconutil validates each file's pixel size, so map our PNGs to the matching
+  # slots (the 1024px image becomes the 512x512@2x retina variant).
+  set(ICON_SRC "${CMAKE_CURRENT_SOURCE_DIR}/assets/images")
   set(ICONSET_DIR "${CMAKE_CURRENT_BINARY_DIR}/qawno.iconset")
   set(ICNS_FILE "${CMAKE_CURRENT_BINARY_DIR}/qawno.icns")
   set(RESORUCES "${ICNS_FILE}")
-  file(GLOB ICON_FILES "${ICON_IMAGES_PATTERN}")
   add_custom_command(
     OUTPUT ${ICNS_FILE}
-    COMMAND mkdir -p "${ICONSET_DIR}"
-    COMMAND cp ${ICON_FILES} "${ICONSET_DIR}/"
-    COMMAND iconutil --convert icns "${ICONSET_DIR}"
-    DEPENDS ${ICON_FILES}
-    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${ICONSET_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy "${ICON_SRC}/icon_16x16.png"     "${ICONSET_DIR}/icon_16x16.png"
+    COMMAND ${CMAKE_COMMAND} -E copy "${ICON_SRC}/icon_32x32.png"     "${ICONSET_DIR}/icon_16x16@2x.png"
+    COMMAND ${CMAKE_COMMAND} -E copy "${ICON_SRC}/icon_32x32.png"     "${ICONSET_DIR}/icon_32x32.png"
+    COMMAND ${CMAKE_COMMAND} -E copy "${ICON_SRC}/icon_128x128.png"   "${ICONSET_DIR}/icon_128x128.png"
+    COMMAND ${CMAKE_COMMAND} -E copy "${ICON_SRC}/icon_256x256.png"   "${ICONSET_DIR}/icon_128x128@2x.png"
+    COMMAND ${CMAKE_COMMAND} -E copy "${ICON_SRC}/icon_256x256.png"   "${ICONSET_DIR}/icon_256x256.png"
+    COMMAND ${CMAKE_COMMAND} -E copy "${ICON_SRC}/icon_512x512.png"   "${ICONSET_DIR}/icon_256x256@2x.png"
+    COMMAND ${CMAKE_COMMAND} -E copy "${ICON_SRC}/icon_512x512.png"   "${ICONSET_DIR}/icon_512x512.png"
+    COMMAND ${CMAKE_COMMAND} -E copy "${ICON_SRC}/icon_1024x1024.png" "${ICONSET_DIR}/icon_512x512@2x.png"
+    COMMAND iconutil --convert icns --output "${ICNS_FILE}" "${ICONSET_DIR}"
+    DEPENDS
+      "${ICON_SRC}/icon_16x16.png"
+      "${ICON_SRC}/icon_32x32.png"
+      "${ICON_SRC}/icon_128x128.png"
+      "${ICON_SRC}/icon_256x256.png"
+      "${ICON_SRC}/icon_512x512.png"
+      "${ICON_SRC}/icon_1024x1024.png"
+    COMMENT "Generating qawno.icns"
+    VERBATIM
   )
 else()
   set(RESOURCES assets/images/qawno.ico)
@@ -116,14 +213,26 @@ add_executable(qawno
 if(APPLE)
   set_target_properties(qawno PROPERTIES
     MACOSX_BUNDLE TRUE
+    MACOSX_BUNDLE_BUNDLE_NAME "Qawno"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "io.openmultiplayer.qawno"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_ICON_FILE "qawno.icns"
+    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/cmake/QawnoInfo.plist.in"
     RESOURCE "${ICNS_FILE}"
   )
 endif()
 
 target_link_libraries(qawno
-  Qt5::Core
-  Qt5::Widgets
+  Qt${QT_VERSION_MAJOR}::Core
+  Qt${QT_VERSION_MAJOR}::Widgets
+  Qt${QT_VERSION_MAJOR}::Svg
+  Qt${QT_VERSION_MAJOR}::Network
 )
+
+if(QT_VERSION_MAJOR EQUAL 6)
+  target_link_libraries(qawno Qt6::Core5Compat)
+endif()
 
 if(WIN32)
   if(MSVC)
@@ -155,7 +264,7 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(WIN32 OR APPLE)
-  get_target_property(QMAKE_EXECUTABLE Qt5::qmake IMPORTED_LOCATION)
+  get_target_property(QMAKE_EXECUTABLE Qt${QT_VERSION_MAJOR}::qmake IMPORTED_LOCATION)
   get_filename_component(QT5_BIN_DIR "${QMAKE_EXECUTABLE}" DIRECTORY)
 endif()
 
@@ -191,6 +300,15 @@ endif()
 
 if(APPLE)
   set_target_properties(qawno PROPERTIES OUTPUT_NAME Qawno)
+
+  # Bundle pawn-cc.sh template into Qawno.app/Contents/Resources/ at build time
+  # so Qawno can deploy a copy into the user's project folder on compile.
+  add_custom_command(TARGET qawno POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/scripts/pawn-cc.sh"
+      "$<TARGET_FILE_DIR:qawno>/../Resources/pawn-cc.sh"
+    COMMENT "Bundling pawn-cc.sh template"
+  )
 
   find_program(MACDEPLOYQT_EXECUTABLE macdeployqt HINTS "${QT5_BIN_DIR}")
   if(NOT MACDEPLOYQT_EXECUTABLE)

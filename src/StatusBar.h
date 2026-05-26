@@ -18,6 +18,9 @@
 
 #include <QStatusBar>
 
+class QLabel;
+class QPushButton;
+
 class StatusBar: public QStatusBar {
  Q_OBJECT
 
@@ -25,6 +28,21 @@ class StatusBar: public QStatusBar {
   StatusBar(QWidget *parent = 0);
 
   void setCursorPosition(int line, int column, int selected);
+  // allSelected => whole document selected: show "Select All".
+  void setCursorPosition(int line, int column, int selected, bool allSelected);
+  // Right-aligned file info; hasFile=false clears it (home screen).
+  void setFileInfo(int totalLines, qint64 bytes, bool hasFile);
+
+  // Shows / hides the "Update available [Update]" chip sitting just left of
+  // the line/byte counters. Empty label hides the chip entirely.
+  void setUpdateAvailable(const QString& label);
+
+ signals:
+  void updateClicked();
+
+ private:
+  QLabel* info_ = nullptr;
+  QPushButton* updateBtn_ = nullptr;
 };
 
 #endif // STATUSBAR_H

@@ -39,6 +39,62 @@ SyntaxHighlighter::ColorScheme SyntaxHighlighter::darkModeColorScheme = {
   QColor(0x9F71CA)
 };
 
+SyntaxHighlighter::ColorScheme SyntaxHighlighter::colorSchemeFor(Language lang, bool dark) {
+  // Per-language palettes — each one returns light/dark variants so the
+  // chosen colour theme follows the app's appearance setting automatically.
+  // `QColor(int)` is ambiguous between QRgb / const char*, so use string hex
+  // literals to keep the call site unambiguous.
+  auto C = [](const char* s) { return QColor(QString::fromLatin1(s)); };
+  switch (lang) {
+    case Language::Pawn:
+      return dark ? darkModeColorScheme : defaultColorScheme;
+    case Language::Cpp:
+      return dark
+          ? ColorScheme{ C("#D4D4D4"), C("#569CD6"), C("#6A9955"), C("#6A9955"),
+                         C("#9CDCFE"), C("#B5CEA8"), C("#CE9178"), C("#CE9178"),
+                         C("#C586C0") }
+          : ColorScheme{ C("#000000"), C("#0000FF"), C("#008000"), C("#008000"),
+                         C("#001080"), C("#098658"), C("#A31515"), C("#A31515"),
+                         C("#AF00DB") };
+    case Language::Python:
+      return dark
+          ? ColorScheme{ C("#E6E6E6"), C("#FF7B72"), C("#8B949E"), C("#8B949E"),
+                         C("#79C0FF"), C("#79C0FF"), C("#A5D6FF"), C("#A5D6FF"),
+                         C("#FFA657") }
+          : ColorScheme{ C("#24292F"), C("#CF222E"), C("#6E7781"), C("#6E7781"),
+                         C("#0550AE"), C("#0550AE"), C("#0A3069"), C("#0A3069"),
+                         C("#953800") };
+    case Language::JavaScript:
+      return dark
+          ? ColorScheme{ C("#EEFFFF"), C("#C792EA"), C("#546E7A"), C("#546E7A"),
+                         C("#82AAFF"), C("#F78C6C"), C("#C3E88D"), C("#C3E88D"),
+                         C("#FFCB6B") }
+          : ColorScheme{ C("#383A42"), C("#A626A4"), C("#A0A1A7"), C("#A0A1A7"),
+                         C("#4078F2"), C("#986801"), C("#50A14F"), C("#50A14F"),
+                         C("#C18401") };
+    case Language::Rust:
+      return dark
+          ? ColorScheme{ C("#E6E6E6"), C("#FF7733"), C("#8B949E"), C("#8B949E"),
+                         C("#DCDCAA"), C("#B5CEA8"), C("#CE9178"), C("#CE9178"),
+                         C("#4EC9B0") }
+          : ColorScheme{ C("#24292F"), C("#D2991D"), C("#6E7781"), C("#6E7781"),
+                         C("#795E26"), C("#098658"), C("#A31515"), C("#A31515"),
+                         C("#267F99") };
+  }
+  return dark ? darkModeColorScheme : defaultColorScheme;
+}
+
+const char* SyntaxHighlighter::languageName(Language lang) {
+  switch (lang) {
+    case Language::Pawn:       return "Pawn";
+    case Language::Cpp:        return "C/C++";
+    case Language::Python:     return "Python";
+    case Language::JavaScript: return "JavaScript";
+    case Language::Rust:       return "Rust";
+  }
+  return "Pawn";
+}
+
 SyntaxHighlighter::SyntaxHighlighter(QObject *parent)
   : QSyntaxHighlighter(parent)
 {

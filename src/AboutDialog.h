@@ -18,19 +18,14 @@
 
 #include <QDialog>
 
-namespace Ui {
-  class AboutDialog;
-}
-
+// A Qt-style "About" dialog: app icon + name + version, a short description of
+// what qawno does, the macOS-port note, and an "About Qt" button.
 class AboutDialog: public QDialog {
  Q_OBJECT
 
  public:
-  explicit AboutDialog(QWidget *parent = 0);
+  explicit AboutDialog(QWidget *parent = nullptr);
   ~AboutDialog() override;
-
- private:
-  Ui::AboutDialog *ui_;
 };
 
 #endif // ABOUTDIALOG_H

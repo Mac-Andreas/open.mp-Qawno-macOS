@@ -172,10 +172,6 @@
      <string>&amp;Build</string>
     </property>
     <addaction name="actionCompile"/>
-    <addaction name="actionCompileRun"/>
-    <addaction name="actionRun"/>
-    <addaction name="actionMark"/>
-    <addaction name="actionNextErr"/>
    </widget>
    <widget class="QMenu" name="menuSettings">
     <property name="title">
@@ -188,12 +184,13 @@
      <addaction name="actionEditorFont"/>
      <addaction name="actionOutputFont"/>
     </widget>
+    <widget class="QMenu" name="menuTheme">
+     <property name="title">
+      <string>&amp;Theme</string>
+     </property>
+    </widget>
     <addaction name="menuFont"/>
-    <addaction name="actionDarkMode"/>
-    <addaction name="actionMRU"/>
-    <addaction name="separator"/>
-    <addaction name="actionCompiler"/>
-    <addaction name="actionServer"/>
+    <addaction name="menuTheme"/>
    </widget>
    <widget class="QMenu" name="menuHelp">
     <property name="title">
@@ -393,7 +390,7 @@
   </action>
   <action name="actionAbout">
    <property name="text">
-    <string>&amp;About</string>
+    <string>&amp;About Qawno</string>
    </property>
   </action>
   <action name="actionAboutQt">

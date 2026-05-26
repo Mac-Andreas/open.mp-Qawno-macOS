@@ -93,6 +93,10 @@ class EditorWidget: public QPlainTextEdit {
   bool usingDarkMode = false;
   int tabWidth_ = 4;
   int indentWidth_ = 4;
+  // Theme-aware color used by the gutter for the current line's number.
+  // Decoupled from QPalette so a global stylesheet can't accidentally
+  // hijack it back to white on macOS dark system.
+  QColor currentLineNumberColor_ = QColor(0x1A1E25);
 };
 
 #endif // EDITORWIDGET_H

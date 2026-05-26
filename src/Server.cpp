@@ -26,8 +26,10 @@ Server::Server() {
   path_ = settings.value("ServerPath", "../omp-server").toString();
   options_ = settings.value("ServerOptions", "--config rcon.password=testing \"%o\"").toString().split("\\s*");
   extras_ = settings.value("ServerExtras", "").toString().split("\\s*");
+#if defined(Q_OS_WIN)
   ZeroMemory(&pi_, sizeof(PROCESS_INFORMATION));
   thread_ = NULL;
+#endif
 }
 
 Server::~Server() {
@@ -35,6 +37,15 @@ Server::~Server() {
   settings.setValue("ServerPath", path_);
   settings.setValue("ServerOptions", options_.join(" "));
   settings.setValue("ServerExtras", extras_.join(" "));
+#if !defined(Q_OS_WIN)
+  // Stop the running server (if any) so it does not outlive the editor.
+  if (process_) {
+    process_->kill();
+    process_->waitForFinished(3000);
+    delete process_;
+    process_ = nullptr;
+  }
+#endif
 }
 
 QString Server::path() const {
@@ -74,7 +85,8 @@ QString Server::output() const {
 }
 
 QString Server::command() const {
-  return QString("%1 %2 -- %3").arg(path_).arg(options_.join(" ")).arg(extras_.join(" "));
+  // Quote the server path: it may contain spaces (e.g. ".../open.mp SA-ZA/...").
+  return QString("\"%1\" %2 -- %3").arg(path_).arg(options_.join(" ")).arg(extras_.join(" "));
 }
 
 QString Server::commandFor(const QString &inputFile) const {
@@ -87,8 +99,8 @@ QString Server::commandFor(const QString &inputFile) const {
   QString c = cmp.isAbsolute() ? cmp.absolutePath() : q + "/" + cmp.path();
   QString d = QDir::currentPath();
 
-  return QString("%1 %2 -- %3")
-    // Invoke the compiler.
+  return QString("\"%1\" %2 -- %3")
+    // Invoke the server.  Quoted path tolerates spaces.
     .arg(path_).arg(options_.join(" ")).arg(extras_.join(" "))
     // Custom arguments.
     .replace("%c", c)
@@ -98,6 +110,12 @@ QString Server::commandFor(const QString &inputFile) const {
     .replace("%o", o)
     .replace("%p", p);
 }
+
+#if defined(Q_OS_WIN)
+
+// --- Windows ---------------------------------------------------------------
+// Unchanged from the original: the server is launched in its own console via
+// the Win32 API and a watcher thread resets state when it exits.
 
 void Server::run(const QString &inputFile) {
   if (pi_.hProcess) {
@@ -140,3 +158,37 @@ DWORD WINAPI Server::threaded(LPVOID p) {
   return 0;
 }
 
+#else
+
+// --- macOS / Linux ---------------------------------------------------------
+// QProcess equivalent: launch the server from its own directory, forward its
+// log to qawno's console, and keep a handle so a re-run can stop the previous
+// instance instead of leaving an orphan on the game port.
+
+void Server::run(const QString &inputFile) {
+  QString q = QCoreApplication::applicationDirPath();
+  QFileInfo cmp(path_);
+  QString workingDir = cmp.isAbsolute()
+                         ? cmp.absolutePath()
+                         : QDir::cleanPath(q + "/" + cmp.path());
+
+  if (process_) {
+    process_->kill();
+    process_->waitForFinished(3000);
+    delete process_;
+    process_ = nullptr;
+  }
+
+  process_ = new QProcess();
+  process_->setWorkingDirectory(workingDir);
+  process_->setProcessChannelMode(QProcess::ForwardedChannels);
+
+  QString command = commandFor(inputFile);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  process_->startCommand(command);
+#else
+  process_->start(command);
+#endif
+}
+
+#endif

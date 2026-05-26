@@ -19,12 +19,22 @@
 #include <QMainWindow>
 #include <QStack>
 #include <QListWidget>
+#include <QFileSystemWatcher>
 #include "Server.h"
 #include "EditorWidget.h"
 
 namespace Ui {
   class MainWindow;
 }
+
+class QToolButton;
+class QVBoxLayout;
+class QAction;
+class QLineEdit;
+class QLabel;
+class QPushButton;
+class FindDialog;
+class SettingsDialog;
 
 class MainWindow: public QMainWindow {
  Q_OBJECT
@@ -37,6 +47,7 @@ class MainWindow: public QMainWindow {
   void closeEvent(QCloseEvent *event) override;
   void dragEnterEvent(QDragEnterEvent *event) override;
   void dropEvent(QDropEvent *event) override;
+  void resizeEvent(QResizeEvent *event) override;
 
  private slots:
   void on_actionNewGM_triggered();
@@ -61,6 +72,7 @@ class MainWindow: public QMainWindow {
   void on_actionReplaceNext_triggered();
   void on_actionReplaceAll_triggered();
   void on_actionGoToLine_triggered();
+  void on_actionSettings_triggered();
 
   void on_actionCompile_triggered();
   void on_actionCompileRun_triggered();
@@ -96,6 +108,17 @@ class MainWindow: public QMainWindow {
 
   void errorClicked();
 
+  // Opens the "Continue?" install prompt and, when accepted, kicks off the
+  // updater (#11 — for now it logs the chosen path).
+  void promptForUpdate();
+  // Triggered when QFileSystemWatcher reports an external change to an open
+  // .pwn. Reloads silently if Qawno's copy is clean; prompts otherwise.
+  void fileChangedExternally(const QString& path);
+  // Mark lines flagged by pawncc with a wavy underline. Called from runCompile
+  // when streaming chunks arrive. Cleared on each new compile.
+  void applyDiagnostic(const QString& filePath, int line, bool isError);
+  void clearDiagnostics();
+
  private:
   QString deprototype(QString func);
   void hidePopup();
@@ -117,6 +140,51 @@ class MainWindow: public QMainWindow {
   void finishSymbol(QString const& symbol, bool add);
   void parseFile(QString const text, bool add);
   void scrollByLines(int n);
+  // Compile the active file with a progress dialog; optionally run after.
+  void runCompile(bool alsoRun);
+  void setCompileActionsEnabled(bool on);
+
+  // Builds the editor-action buttons + view toggles that live in the tab bar's
+  // top-right corner (VS Code style: fixed while the tabs scroll).
+  void buildTopControls();
+  // Builds the VS Code-style start page shown when no files are open.
+  QWidget* buildWelcome();
+  // macOS: builds the two status tiles on the welcome page — CrossOver (detect
+  // + 32-bit Qawno bottle) and Qawno files (the compiler files that must sit in
+  // the qawno folder). Returns a row widget holding both.
+  QWidget* buildMacToolingCards();
+  QWidget* buildCrossOverCard();
+  QWidget* buildQawnoFilesCard();
+  QWidget* buildWineCard();
+  QWidget* buildCompilerCard();
+  // Re-tints every QAction icon for the current theme. Called from applyTheme
+  // so dark-on-dark icons swap to a light tint (and vice versa).
+  void applyThemedActionIcons(bool dark);
+  void refreshCrossOverCard();
+  void refreshQawnoFilesCard();
+  void setupCrossOverBottle();
+  void reinstallCrossOverBottle();
+  // Preflight before compiling on macOS: CrossOver installed, Qawno bottle
+  // present, and the compiler files inside <pwnDir>/qawno/. Shows an error and
+  // returns false if anything is missing.
+  bool macCompilePreflight(const QString& pwnFile);
+  // Copy the bundled pawn-cc.sh template into the given qawno/ folder (beside
+  // the .pwn) if not already there. Creates the folder if missing — but the
+  // preflight already requires pawncc.exe to be there, so this only fires when
+  // the user has the compiler files in place.
+  void deployPawnScript(const QString& qawnoDir);
+  void refreshRecents();
+  void updateWelcomeVisibility();
+  void addRecentFile(const QString& path);
+  void zoomEditor(int delta);
+  bool zoomFocused(int delta);
+  void updateFileInfo();
+
+  // Light/Dark/System theme handling. themeMode_: 0 = system, 1 = light,
+  // 2 = dark. effectiveDarkMode() resolves "system" against the OS scheme.
+  void applyTheme();
+  void setThemeMode(int mode);
+  bool effectiveDarkMode() const;
 
  private:
   Ui::MainWindow *ui_;
@@ -167,6 +235,85 @@ class MainWindow: public QMainWindow {
   QColor lastColour_ = QColor(0xFF, 0xFF, 0xFF, 0xAA);
 
   // Other data.
+  // Top-right corner controls and the start page.
+  QToolButton* themeButton_ = nullptr;
+  QToolButton* newButton_ = nullptr;
+  QAction* themeSystemAct_ = nullptr;
+  QAction* themeLightAct_ = nullptr;
+  QAction* themeDarkAct_ = nullptr;
+  QWidget* sidebarContainer_ = nullptr;
+  QWidget* sidebarPane_ = nullptr;
+  bool sidebarAutoHidden_ = false;
+  QWidget* welcomeWidget_ = nullptr;
+  QVBoxLayout* recentsLayout_ = nullptr;
+  // macOS CrossOver card widgets (null on non-macOS builds).
+  QLabel* cxStatusPill_ = nullptr;
+  QLabel* cxDetail_ = nullptr;
+  QPushButton* cxSetupButton_ = nullptr;
+  QPushButton* cxReinstallButton_ = nullptr;
+  // macOS "Qawno files" card widgets.
+  QLabel* filesStatusPill_ = nullptr;
+  QLabel* filesDetail_ = nullptr;
+  int themeMode_ = 0; // 0 = system, 1 = light, 2 = dark.
+  // Tab bar hover-to-close: index of the currently hovered tab (-1 = none).
+  int hoveredTabIndex_ = -1;
+  // "+" new-tab button parented to the tabBar; floats just right of the
+  // rightmost tab (repositioned on tab add/remove/resize).
+  QToolButton* addTabBtn_ = nullptr;
+  void repositionAddTabBtn();
+
+  // Shorten paths for display: strip the user's home prefix
+  // (/Users/<user>/foo → /foo) and the Wine-mapped equivalent (Z:\Users\<user>
+  // → \). When SettingsDialog::fullPathInOutput() is false, additionally trim
+  // log paths to just the filename.
+  QString shortenPath(const QString& path) const;
+  QString stripUserPrefix(const QString& path) const;
+
+  // Watches every loaded .pwn for external writes (other editors, CI, AI
+  // tooling). When a file changes on disk and the in-editor buffer is clean,
+  // reload silently; otherwise prompt before discarding edits.
+  QFileSystemWatcher fileWatcher_;
+  // Suppresses the watcher's own "we just saved" trigger.
+  qint64 lastSelfSaveMs_ = 0;
+  QString lastSelfSavedPath_;
+
+  // Persistent Find & Replace popup (lazy-created on first use). Lives across
+  // open/close cycles so its state (text, options) survives between sessions.
+  FindDialog* findDialog_ = nullptr;
+  SettingsDialog* settingsDialog_ = nullptr;
+  void ensureFindDialog();
+
+  // VS Code-style inline find bar pinned above the active editor. Shown via
+  // the toolbar Search button; Esc/X hides it. The bar reuses
+  // FindDialog state for its options.
+  QWidget* inlineFindBar_ = nullptr;
+  QLineEdit* inlineFindEdit_ = nullptr;
+  QLineEdit* inlineReplaceEdit_ = nullptr;
+  QWidget* inlineReplaceRow_ = nullptr;
+  QLabel* inlineFindStatus_ = nullptr;
+  QToolButton* inlineMatchCase_ = nullptr;
+  QToolButton* inlineWholeWord_ = nullptr;
+  QToolButton* inlineRegex_ = nullptr;
+  void ensureInlineFindBar();
+  void toggleInlineFindBar();
+  void runInlineFind(bool backward);
+  void runInlineReplaceOne();
+  void runInlineReplaceAll();
+
+  // Update the theme toolbar button's label + icon to reflect the current mode.
+  void updateThemeButton();
+
+  // Toolbar buttons stored here so toggling the "show text" setting can flip
+  // them all between text+icon and icon-only.
+  QVector<QToolButton*> toolbarButtons_;
+  QWidget* topToolbar_ = nullptr;
+  void applyToolbarStyle();
+  // Single replace at the current cursor when the find term matches, then
+  // advance to the next match. Returns true if a replacement happened.
+  bool performReplaceOnce();
+  // Replace every match in the active document; returns the count.
+  int performReplaceAll();
+
   QStack<int> mru_;
   int findStart_ = 0;
   int findRound_ = 0;
