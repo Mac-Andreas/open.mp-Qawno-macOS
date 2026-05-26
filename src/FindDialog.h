@@ -17,32 +17,66 @@
 #define FINDDIALOG_H
 
 #include <QDialog>
+#include <QPoint>
 #include <QString>
 
-namespace Ui {
-  class FindDialog;
-}
+class QLineEdit;
+class QCheckBox;
+class QLabel;
+class QPushButton;
+class QWidget;
+class IosToggle;
 
-class FindDialog: public QDialog {
- Q_OBJECT
+// Frameless, non-modal Find & Replace popup. Single persistent instance per
+// MainWindow: clicking Find / Replace / Replace All emits signals without
+// closing the popup, and a status banner reports the outcome inline
+// ("Replaced N occurrences"). Draggable from its custom title bar; the X
+// button hides the popup.
+class FindDialog : public QDialog {
+  Q_OBJECT
 
  public:
-  explicit FindDialog(QWidget *parent = 0);
+  explicit FindDialog(QWidget* parent = nullptr);
   ~FindDialog() override;
 
   QString findWhatText() const;
   QString replaceText() const;
-
   bool matchCase() const;
   bool matchWholeWords() const;
   bool useRegExp() const;
   bool searchBackwards() const;
 
+  void focusFindField();
+  void setStatus(const QString& message, bool error = false);
+  void clearStatus();
+  void applyTheme(bool dark);
+
+ signals:
+  void findRequested();
+  void replaceRequested();
+  void replaceAllRequested();
+
+ protected:
+  bool eventFilter(QObject* obj, QEvent* ev) override;
+  void showEvent(QShowEvent* ev) override;
+
  private:
-  Ui::FindDialog *ui_;
- private slots:
-  void all();
-  void replace();
+  QWidget* titleBar_ = nullptr;
+  QLabel* titleLabel_ = nullptr;
+  QPushButton* closeBtn_ = nullptr;
+  QLineEdit* findEdit_ = nullptr;
+  QLineEdit* replaceEdit_ = nullptr;
+  IosToggle* matchCase_ = nullptr;
+  IosToggle* matchWhole_ = nullptr;
+  IosToggle* useRegexp_ = nullptr;
+  IosToggle* searchBack_ = nullptr;
+  QPushButton* findBtn_ = nullptr;
+  QPushButton* replaceBtn_ = nullptr;
+  QPushButton* replaceAllBtn_ = nullptr;
+  QLabel* statusLabel_ = nullptr;
+
+  bool dragging_ = false;
+  QPoint dragOffset_;
 };
 
 #endif // FINDDIALOG_H

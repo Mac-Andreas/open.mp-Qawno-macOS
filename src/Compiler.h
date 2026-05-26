@@ -38,6 +38,11 @@ class Compiler {
 
   void run(const QString &inputFile);
 
+  // Runs the compiler with no input and parses the banner for a "x.y.z" or
+  // "vX.Y.Z" version string. Returns empty if the compiler can't be invoked or
+  // the banner doesn't include a recognisable version number.
+  QString detectVersion() const;
+
  private:
   QString path_;
   QStringList options_;

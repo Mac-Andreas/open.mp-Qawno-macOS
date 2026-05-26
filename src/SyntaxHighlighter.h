@@ -36,6 +36,11 @@ class SyntaxHighlighter: public QSyntaxHighlighter {
 
   static ColorScheme defaultColorScheme;
   static ColorScheme darkModeColorScheme;
+  // Auto-inverting language colour profiles. Each profile resolves to a
+  // light/dark variant via colorSchemeFor() based on the active theme.
+  enum class Language { Pawn, Cpp, Python, JavaScript, Rust };
+  static ColorScheme colorSchemeFor(Language lang, bool dark);
+  static const char* languageName(Language lang);
 
   explicit SyntaxHighlighter(QObject *parent);
   ~SyntaxHighlighter() override;

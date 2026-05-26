@@ -40,38 +40,58 @@ EditorWidget *EditorLineNumberWidget::editor() const {
 
 QSize EditorLineNumberWidget::sizeHint() const {
   int lineCount = editor()->blockCount();
-  int digitWidth = fontMetrics().horizontalAdvance(QLatin1Char('0'));
+  QFont f = editor()->font();
+  // Force tabular-numerals layout so a proportional fallback font (e.g. the
+  // system UI font when "Courier New" is missing) still gives each digit the
+  // same advance — keeps the gutter numbers right-aligned to a fixed column.
+  f.setStyleHint(QFont::Monospace);
+  f.setFixedPitch(true);
+  QFontMetrics fm(f);
+  // Measure the widest digit (8 is widest in most fonts) so we never crop
+  // numbers like 1888.
+  int digitWidth = 0;
+  for (QChar c : QStringLiteral("0123456789")) {
+    digitWidth = qMax(digitWidth, fm.horizontalAdvance(c));
+  }
   int numDigits = QString::number(lineCount).length();
-  int width =  digitWidth * (numDigits + 2);
+  int width = digitWidth * qMax(numDigits, 2) + 16;
   return QSize(width, 0);
 }
 
 void EditorLineNumberWidget::paintEvent(QPaintEvent *event) {
   QPainter painter(this);
-  painter.setPen(palette().windowText().color());
+  painter.setRenderHint(QPainter::TextAntialiasing, true);
   painter.fillRect(event->rect(), palette().window().color());
+
+  // Use the editor's own (possibly zoomed) font so the numbers line up exactly
+  // with each text row and stay crisp. Force fixed-pitch so the digits land
+  // on a consistent grid even if the family falls back to a proportional one.
+  QFont f = editor()->font();
+  f.setStyleHint(QFont::Monospace);
+  f.setFixedPitch(true);
+  painter.setFont(f);
+  const QColor fg = palette().windowText().color();
+  const QColor fgCurrent = editor()->currentLineNumberColor_;
+  const int currentLine = editor()->textCursor().blockNumber();
 
   QTextBlock block = editor()->firstVisibleBlock();
   QPointF contentOffset = editor()->contentOffset();
-  QRectF boundingGeometry = editor()->blockBoundingGeometry(block);
-
-  qreal top = boundingGeometry.translated(contentOffset).top();
+  qreal top = editor()->blockBoundingGeometry(block).translated(contentOffset).top();
   qreal bottom = top + editor()->blockBoundingRect(block).height();
+  const int rightPad = 8;
 
-  do {
-    if (bottom >= event->rect().top()) {
-      QString lineNumber = QString::number(block.blockNumber() + 1);
-      int digitWidth = fontMetrics().horizontalAdvance(QLatin1Char('0'));
-      int numDigits = lineNumber.length();
-      QRect rect(digitWidth, static_cast<int>(top), digitWidth * numDigits, static_cast<int>(bottom));
-      painter.drawText(rect, Qt::AlignRight, lineNumber);
+  while (block.isValid() && top <= event->rect().bottom()) {
+    if (block.isVisible() && bottom >= event->rect().top()) {
+      const int n = block.blockNumber();
+      painter.setPen(n == currentLine ? fgCurrent : fg);
+      QRect rect(0, static_cast<int>(top),
+                 width() - rightPad, static_cast<int>(bottom - top));
+      painter.drawText(rect, Qt::AlignRight | Qt::AlignVCenter, QString::number(n + 1));
     }
     block = block.next();
     top = bottom;
     bottom = top + editor()->blockBoundingRect(block).height();
   }
-  while (block.isValid() && block.isVisible()
-         && top <= event->rect().bottom());
 }
 
 void EditorLineNumberWidget::resizeEvent(QResizeEvent *event) {
@@ -100,11 +120,13 @@ void EditorLineNumberWidget::updateGeometry() {
 static QFont defaultFont() {
   #ifdef Q_OS_WIN32
     QFont font("Courier New");
+  #elif defined(Q_OS_MAC)
+    QFont font("Menlo");
   #else
     QFont font("Monospace");
   #endif
   font.setStyleHint(QFont::Monospace);
-  font.setPointSize(10);
+  font.setPointSize(13);
   return font;
 }
 
@@ -159,20 +181,59 @@ void EditorWidget::setIndentWidth(int width) {
 }
 
 void EditorWidget::toggleDarkMode(bool toggle) {
-  QPalette lineNumAreaPalette;
+  QColor base, text, gutterBg, gutterFg;
+  // Resolve the user's chosen language → scheme for the active theme. Falls
+  // back to Pawn when the setting hasn't been touched yet (matches the
+  // historical default).
+  const QString lang = QSettings().value("SyntaxLanguage", "Pawn").toString();
+  auto resolveLang = [](const QString& s) {
+    if (s == "Cpp")        return SyntaxHighlighter::Language::Cpp;
+    if (s == "Python")     return SyntaxHighlighter::Language::Python;
+    if (s == "JavaScript") return SyntaxHighlighter::Language::JavaScript;
+    if (s == "Rust")       return SyntaxHighlighter::Language::Rust;
+    return SyntaxHighlighter::Language::Pawn;
+  };
+  highlighter_.setColorScheme(
+      SyntaxHighlighter::colorSchemeFor(resolveLang(lang), toggle));
   if (toggle) {
-    highlighter_.setColorScheme(SyntaxHighlighter::darkModeColorScheme);
-    lineNumAreaPalette.setColor(lineNumberArea_.backgroundRole(), QColor(0x2D333D));
-    lineNumAreaPalette.setColor(lineNumberArea_.foregroundRole(), QColor(0x636D83));
+    base = QColor(0x282C34);
+    text = QColor(0xABB2BF);
+    gutterBg = QColor(0x282C34);
+    gutterFg = QColor(0x858585);
+    currentLineNumberColor_ = QColor(0xFFFFFF);
   } else {
-    highlighter_.setColorScheme(SyntaxHighlighter::defaultColorScheme);
-    lineNumAreaPalette.setColor(lineNumberArea_.backgroundRole(), Qt::lightGray);
-    lineNumAreaPalette.setColor(lineNumberArea_.foregroundRole(), Qt::black);
+    base = QColor(0xFFFFFF);
+    text = QColor(0x1A1E25);
+    gutterBg = QColor(0xFFFFFF);
+    gutterFg = QColor(0x6E7681);
+    currentLineNumberColor_ = QColor(0x1A1E25);
   }
   usingDarkMode = toggle;
+  // Editor surface: stylesheet on the viewport only so it doesn't cascade
+  // into the line-number child widget.
+  setStyleSheet(QString());
+  QPalette ep = palette();
+  ep.setColor(QPalette::Base, base);
+  ep.setColor(QPalette::Text, text);
+  setPalette(ep);
+  viewport()->setStyleSheet(
+      QString("QWidget { background-color: %1; color: %2; }")
+          .arg(base.name(), text.name()));
+  // Gutter: drive colors through both the palette AND a direct stylesheet so
+  // Qt repaints reliably across theme switches (palette-only sometimes
+  // leaves stale pixels until the next resize).
+  QPalette gp;
+  gp.setColor(lineNumberArea_.backgroundRole(), gutterBg);
+  gp.setColor(lineNumberArea_.foregroundRole(), gutterFg);
+  lineNumberArea_.setAutoFillBackground(true);
+  lineNumberArea_.setPalette(gp);
+  lineNumberArea_.setStyleSheet(
+      QString("QWidget { background-color: %1; color: %2; }")
+          .arg(gutterBg.name(), gutterFg.name()));
   highlighter_.rehighlight();
-  lineNumberArea_.setPalette(lineNumAreaPalette);
+  lineNumberArea_.QWidget::update();
   highlightCurrentLine();
+  viewport()->update();
 }
 
 void EditorWidget::jumpToLine(long line) {
@@ -230,19 +291,9 @@ void EditorWidget::keyPressEvent(QKeyEvent *event) {
 }
 
 void EditorWidget::highlightCurrentLine() {
-  if (!isReadOnly()) {
-    QList<QTextEdit::ExtraSelection> extraSelections;
-    QTextEdit::ExtraSelection selection;
-    if (usingDarkMode) {
-      selection.format.setBackground(QColor(0x2D333D));
-    } else {
-      selection.format.setBackground(QColor(Qt::lightGray).lighter(120));
-    }
-    selection.format.setProperty(QTextFormat::FullWidthSelection, true);
-    selection.cursor = textCursor();
-    selection.cursor.clearSelection();
-    setExtraSelections(extraSelections << selection);
-  }
+  // VS Code-style: no full-line highlight, just the thin caret. Clear any
+  // existing extra selections so the current line is not painted over.
+  setExtraSelections({});
 }
 
 void EditorWidget::editSelectedText(QTextCursor cursor,

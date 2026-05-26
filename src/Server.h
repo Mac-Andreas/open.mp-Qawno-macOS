@@ -18,8 +18,18 @@
 
 #include <QString>
 #include <QStringList>
+
+#if defined(Q_OS_WIN)
+// On Windows the server is spawned with the Win32 API so it gets its own
+// console window, exactly as it always has.
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#else
+// Every other platform (macOS, Linux) drives the server through QProcess.
+QT_BEGIN_NAMESPACE
+class QProcess;
+QT_END_NAMESPACE
+#endif
 
 class Server {
  public:
@@ -32,7 +42,7 @@ class Server {
   QStringList options() const;
   void setOptions(const QString &options);
   void setOptions(const QStringList &options);
-  
+
   QStringList extras() const;
   void setExtras(const QString &extras);
   void setExtras(const QStringList &extras);
@@ -49,10 +59,15 @@ class Server {
   QStringList options_;
   QStringList extras_;
   QString output_;
+
+#if defined(Q_OS_WIN)
   HANDLE thread_;
   PROCESS_INFORMATION pi_;
 
   static DWORD WINAPI threaded(LPVOID);
+#else
+  QProcess *process_ = nullptr;
+#endif
 };
 
 #endif // SERVER_H

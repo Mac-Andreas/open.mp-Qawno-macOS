@@ -18,33 +18,91 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileDialog>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+// QTextCodec moved to the Core5Compat module in Qt6; it is still the only way
+// to read/write the Windows-1251 encoding that SA-MP/open.mp scripts use.
+#include <QtCore5Compat/QTextCodec>
+#else
 #include <QTextCodec>
+#endif
 #include <QTextStream>
 #include <QFont>
 #include <QFontDialog>
 #include <QMessageBox>
 #include <QMimeData>
-#include <QRegExp>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QUndoStack>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QColorDialog>
+#include <QToolBar>
+#include <QToolButton>
+#include <QTabBar>
+#include <QHoverEvent>
+#include <QMouseEvent>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QGridLayout>
+#include <QMenu>
+#include <QActionGroup>
+#include <QFrame>
+#include <QPixmap>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QStyleHints>
+#include <QDateTime>
+#include <QProgressDialog>
+#include <QProgressBar>
+#include <QSplitter>
+#include <QDialog>
+#include <QPlainTextEdit>
+#include <QProcess>
+#include <QTimer>
+#include <QStyle>
+#include <QToolTip>
+#include <QHelpEvent>
+#include <QFileOpenEvent>
+
+#include <memory>
+#include <functional>
 
 #include "AboutDialog.h"
 #include "Compiler.h"
 #include "CompilerSettingsDialog.h"
+#include "Installer.h"
+#include "UpdateChecker.h"
+#include "UpdatePromptDialog.h"
+#include "WineManager.h"
+#include "Spinner.h"
+#include "IosToggle.h"
+#include "IconLoader.h"
+#include "qawno.h"
+#include <QStandardPaths>
 #include "ServerSettingsDialog.h"
+#include "SettingsDialog.h"
+#include "CrossOver.h"
 #include "EditorWidget.h"
 #include "FindDialog.h"
 #include "GoToDialog.h"
 #include "MainWindow.h"
 #include "OutputWidget.h"
-#include "ReplaceDialog.h"
 #include "StatusBar.h"
 
 #include "ui_MainWindow.h"
+
+// macOS defaults to a dark system appearance, so the editor's base background
+// is dark out of the box; default qawno's dark theme on so the gutter, current
+// line and syntax colours match. Other platforms keep the light default.
+#ifdef Q_OS_MACOS
+static constexpr bool kDefaultDarkMode = true;
+#else
+static constexpr bool kDefaultDarkMode = false;
+#endif
 
 MainWindow::MainWindow(QWidget *parent)
   : QMainWindow(parent),
@@ -55,17 +113,150 @@ MainWindow::MainWindow(QWidget *parent)
     mru_()
 {
   ui_->setupUi(this);
-  ui_->tabWidget->setTabsClosable(true);
+  ui_->tabWidget->setTabsClosable(false);
+  ui_->tabWidget->setMovable(true);
+  ui_->tabWidget->setDocumentMode(true);
+  ui_->tabWidget->setUsesScrollButtons(true);
+  ui_->tabWidget->tabBar()->setExpanding(false);
+  // Long file names get elided with "..." instead of stretching the tab.
+  ui_->tabWidget->tabBar()->setElideMode(Qt::ElideRight);
+  ui_->tabWidget->tabBar()->setUsesScrollButtons(true);
+  ui_->tabWidget->setStyleSheet("QTabBar::tab { max-width: 140px; }");
+  // Explicit iconSize otherwise the QSS `padding:` rule for QTabBar::tab can
+  // squash icons down to 0×0 on macOS, hiding them entirely.
+  ui_->tabWidget->setIconSize(QSize(14, 14));
+  // Hover-to-close: file icon morphs into X on hover; clicking the icon closes
+  // the tab. Handled in eventFilter() — mouse moves/clicks on tabBar().
+  ui_->tabWidget->tabBar()->setMouseTracking(true);
+  ui_->tabWidget->tabBar()->setAttribute(Qt::WA_Hover, true);
+  ui_->tabWidget->tabBar()->installEventFilter(this);
+
+  // Set a sane minimum window size so the layout never collapses badly.
+  setMinimumSize(720, 480);
+
+  // Modern line icons for the editor actions.
+  ui_->actionNewGM->setIcon(QIcon(":/assets/images/icons/new.svg"));
+  ui_->actionOpen->setIcon(QIcon(":/assets/images/icons/open.svg"));
+  ui_->actionSave->setIcon(QIcon(":/assets/images/icons/save.svg"));
+  ui_->actionCompileRun->setIcon(QIcon(":/assets/images/icons/run.svg"));
+  ui_->actionCompileRun->setText(tr("Compile && Run"));
+
+  // Menu-item icons. Use our custom SVGs where we have them; fall back to the
+  // platform's standard icons for the common edit/file actions.
+  ui_->actionNewFS->setIcon(QIcon(":/assets/images/icons/new.svg"));
+  ui_->actionNewInc->setIcon(QIcon(":/assets/images/icons/new.svg"));
+  ui_->actionNewBlank->setIcon(QIcon(":/assets/images/icons/new.svg"));
+  ui_->actionSaveAs->setIcon(QIcon(":/assets/images/icons/save.svg"));
+  ui_->actionSaveAll->setIcon(QIcon(":/assets/images/icons/save.svg"));
+  ui_->actionCompile->setIcon(QIcon(":/assets/images/icons/run.svg"));
+  ui_->actionRun->setIcon(QIcon(":/assets/images/icons/run.svg"));
+  auto std = [this](QStyle::StandardPixmap sp) { return style()->standardIcon(sp); };
+  ui_->actionClose->setIcon(QIcon(":/assets/images/icons/close.svg"));
+  ui_->actionQuit->setIcon(QIcon(":/assets/images/icons/quit.svg"));
+#ifdef Q_OS_MACOS
+  // macOS auto-binds Cmd+Q to the application's Quit menu item via the
+  // standard QuitRole; the explicit Ctrl+Q from the .ui file would conflict.
+  ui_->actionQuit->setShortcut(QKeySequence());
+#endif
+  ui_->actionUndo->setIcon(QIcon(":/assets/images/icons/undo.svg"));
+  ui_->actionRedo->setIcon(QIcon(":/assets/images/icons/redo.svg"));
+  ui_->actionCut->setIcon(QIcon(":/assets/images/icons/cut.svg"));
+  ui_->actionCopy->setIcon(QIcon(":/assets/images/icons/copy.svg"));
+  ui_->actionPaste->setIcon(QIcon(":/assets/images/icons/paste.svg"));
+  ui_->actionFind->setIcon(QIcon(":/assets/images/icons/find.svg"));
+  ui_->actionFindNext->setIcon(QIcon(":/assets/images/icons/find-next.svg"));
+  ui_->actionGoToLine->setIcon(QIcon(":/assets/images/icons/goto-line.svg"));
+  ui_->actionDupsel->setIcon(QIcon(":/assets/images/icons/duplicate-selection.svg"));
+  ui_->actionDupline->setIcon(QIcon(":/assets/images/icons/duplicate-line.svg"));
+  ui_->actionDelline->setIcon(QIcon(":/assets/images/icons/delete-line.svg"));
+  ui_->actionComment->setIcon(QIcon(":/assets/images/icons/comment.svg"));
+  ui_->actionColours->setIcon(QIcon(":/assets/images/icons/color-picker.svg"));
+  ui_->actionColours->setText(tr("Colour &Picker"));
+  ui_->actionMark->setIcon(std(QStyle::SP_DialogApplyButton));
+  ui_->actionNextErr->setIcon(std(QStyle::SP_MessageBoxWarning));
+  ui_->actionCompiler->setIcon(std(QStyle::SP_FileDialogDetailedView));
+  ui_->actionServer->setIcon(std(QStyle::SP_ComputerIcon));
+  ui_->actionAbout->setIcon(std(QStyle::SP_MessageBoxInformation));
+  ui_->actionAboutQt->setIcon(std(QStyle::SP_MessageBoxInformation));
+
+  // The INCLUDES list lives in its own bordered box, with a header that looks
+  // like part of it. Wrap the existing `functions` list (and its header) in
+  // that container, then drop it back into the right-hand splitter pane.
+  static const int kSidebarWidth = 250;
+
+  // Right-hand sidebar: the INCLUDES box. The action toolbar now lives in a
+  // full-width strip above the splitter, so the sidebar pane no longer needs
+  // a top spacer — INCLUDES header sits at the top of the pane, on the same
+  // row as the tab strip in the editor pane.
+  sidebarContainer_ = new QWidget;
+  sidebarContainer_->setObjectName("sidebarPaneOuter");
+  sidebarPane_ = sidebarContainer_;
+  QVBoxLayout* outerSidebarLayout = new QVBoxLayout(sidebarContainer_);
+  outerSidebarLayout->setContentsMargins(0, 0, 0, 0);
+  outerSidebarLayout->setSpacing(0);
+
+  QWidget* sidebarBox = new QWidget(sidebarContainer_);
+  sidebarBox->setObjectName("sidebarBox");
+  QVBoxLayout* sidebarLayout = new QVBoxLayout(sidebarBox);
+  sidebarLayout->setContentsMargins(0, 0, 0, 0);
+  sidebarLayout->setSpacing(0);
+  QLabel* includesHeader = new QLabel(tr("INCLUDES LIBRARY"), sidebarBox);
+  includesHeader->setObjectName("sidebarHeader");
+  includesHeader->setAlignment(Qt::AlignCenter);
+  includesHeader->setFixedHeight(28);
+  includesHeader->setToolTip(tr("Natives and functions, grouped by include file"));
+  sidebarLayout->addWidget(includesHeader, 0);
+  sidebarLayout->addWidget(ui_->functions, 1); // reparents it out of the splitter
+  outerSidebarLayout->addWidget(sidebarBox, 1);
+
+  ui_->divider->insertWidget(1, sidebarContainer_);
+  ui_->divider->setSizes({ 900, kSidebarWidth });
+
+  // Make the horizontal splitter (editor | sidebar) user-draggable.
+  // The sidebar pane has a hard minimum width — dragging the splitter past
+  // that minimum is blocked, so the INCLUDES panel can't be accidentally
+  // shrunk to a sliver or collapsed by drag.
+  static constexpr int kSidebarMinWidth = 180;
+  sidebarContainer_->setMinimumWidth(kSidebarMinWidth);
+  ui_->divider->setHandleWidth(5);
+  ui_->divider->setChildrenCollapsible(false);
+
+  // Thin handle between editor and output panel (kills the big dark gap).
+  ui_->splitter->setHandleWidth(3);
+  ui_->splitter->setChildrenCollapsible(false);
+
+  // Compact VS Code-style action buttons + view toggles in the tab bar corner.
+  buildTopControls();
+
+  // Note: the window-level stylesheet (and its theme colors) is applied in
+  // applyTheme(); the radius/structure for sidebar box + list lives there too.
 
   setStatusBar(new StatusBar(this));
 
   QSettings settings;
 
-  defaultPalette = ui_->splitter->palette();
+  // Explicit light palette: macOS defaults the system appearance to dark, so a
+  // bare default palette leaves a dark Base/Text under the light syntax scheme.
+  // Force light surfaces and dark text so light mode is readable.
+  QPalette lightPalette;
+  lightPalette.setColor(QPalette::Window, QColor(0xF4F6F8));
+  lightPalette.setColor(QPalette::WindowText, QColor(0x1A1E25));
+  lightPalette.setColor(QPalette::Base, QColor(0xFFFFFF));
+  lightPalette.setColor(QPalette::AlternateBase, QColor(0xEEF1F4));
+  lightPalette.setColor(QPalette::ToolTipBase, QColor(0xFFFFFF));
+  lightPalette.setColor(QPalette::ToolTipText, QColor(0x1A1E25));
+  lightPalette.setColor(QPalette::Text, QColor(0x1A1E25));
+  lightPalette.setColor(QPalette::Button, QColor(0xE8ECF0));
+  lightPalette.setColor(QPalette::ButtonText, QColor(0x1A1E25));
+  lightPalette.setColor(QPalette::BrightText, Qt::red);
+  lightPalette.setColor(QPalette::Link, QColor(0x1E6BB8));
+  lightPalette.setColor(QPalette::Highlight, QColor(0xCCE0F5));
+  lightPalette.setColor(QPalette::HighlightedText, QColor(0x1A1E25));
+  defaultPalette = lightPalette;
 
   QPalette darkPalette;
   darkPalette.setColor(QPalette::Window, QColor(0x282C34));
-  darkPalette.setColor(QPalette::WindowText, Qt::black);
+  darkPalette.setColor(QPalette::WindowText, Qt::white);
   darkPalette.setColor(QPalette::Base, QColor(0x282C34));
   darkPalette.setColor(QPalette::AlternateBase, QColor(0x282C34));
   darkPalette.setColor(QPalette::ToolTipBase, Qt::white);
@@ -80,19 +271,27 @@ MainWindow::MainWindow(QWidget *parent)
 
   darkModePalette = darkPalette;
 
-  bool useDarkMode = settings.value("DarkMode", false).toBool();
-  ui_->actionDarkMode->setChecked(useDarkMode);
-  
+  // Restore the theme. Migrate the old boolean "DarkMode" setting if present.
+  if (settings.contains("ThemeMode")) {
+    themeMode_ = settings.value("ThemeMode", 0).toInt();
+  } else {
+    themeMode_ = settings.value("DarkMode", kDefaultDarkMode).toBool() ? 2 : 1;
+  }
+
   bool useMRU = settings.value("MRU", false).toBool();
   ui_->actionMRU->setChecked(useMRU);
 
-  if (useDarkMode) {
-    ui_->outerWidget->setPalette(darkModePalette);
-  } else {
-    ui_->outerWidget->setPalette(defaultPalette);
+  {
+    QSize want = settings.value("WindowSize", QSize(1000, 700)).toSize();
+    // Never restore larger than the available screen (avoids opening offscreen
+    // / oversized when toggling between the welcome page and the editor).
+    if (QScreen* scr = QGuiApplication::primaryScreen()) {
+      QSize avail = scr->availableSize();
+      want.setWidth(qMin(want.width(), avail.width()));
+      want.setHeight(qMin(want.height(), avail.height()));
+    }
+    resize(want);
   }
-
-  resize(settings.value("WindowSize", QSize(800, 600)).toSize());
   if (settings.value("Maximized", false).toBool()) {
     setWindowState(Qt::WindowMaximized);
   }
@@ -125,12 +324,13 @@ MainWindow::MainWindow(QWidget *parent)
       ++idx;
     }
   }
-  if (loaded == 0) {
-    on_actionNewGM_triggered();
-  }
+  // When nothing loaded, the welcome page (set up below) is shown instead of
+  // force-creating an empty file.
 
   connect(ui_->tabWidget, SIGNAL(currentChanged(int)), SLOT(currentChanged(int)));
   connect(ui_->tabWidget, SIGNAL(tabCloseRequested(int)), SLOT(tabCloseRequested(int)));
+  connect(&fileWatcher_, &QFileSystemWatcher::fileChanged,
+          this, &MainWindow::fileChangedExternally);
   connect(ui_->functions, SIGNAL(currentRowChanged(int)), SLOT(currentRowChanged(int)));
   connect(ui_->functions, SIGNAL(itemClicked(QListWidgetItem*)), SLOT(itemClicked(QListWidgetItem*)));
   connect(ui_->functions, SIGNAL(itemDoubleClicked(QListWidgetItem*)), SLOT(itemDoubleClicked(QListWidgetItem*)));
@@ -142,6 +342,61 @@ MainWindow::MainWindow(QWidget *parent)
   updateTitle();
 
   ui_->tabWidget->setCurrentIndex(settings.value("LastViewed", 0).toInt());
+
+  // VS Code-style start page, shown whenever no files are open.
+  welcomeWidget_ = buildWelcome();
+  ui_->horizontalLayout->addWidget(welcomeWidget_);
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+  // Follow live OS appearance changes while in "System" mode.
+  connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
+          [this](Qt::ColorScheme) { if (themeMode_ == 0) applyTheme(); });
+#endif
+
+  applyTheme();
+  updateWelcomeVisibility();
+
+  // Footer "Update available" chip — driven entirely by UpdateChecker. We
+  // re-render on every signal so the chip clears itself when a newer release
+  // matches the locally-installed version.
+  if (auto* sb = dynamic_cast<StatusBar*>(statusBar())) {
+    auto refreshUpdateChip = [sb] {
+      auto* uc = UpdateChecker::instance();
+      const auto compRel  = uc->latest(UpdateChecker::Component::Compiler);
+      const auto qawnoRel = uc->latest(UpdateChecker::Component::Qawno);
+      const QString currentQawno = QString::fromLatin1(QAWNO_VERSION_STRING);
+      QStringList parts;
+      if (!qawnoRel.version.isEmpty() && qawnoRel.version != currentQawno) {
+        parts << tr("Qawno %1").arg(qawnoRel.tag);
+      }
+      if (!compRel.version.isEmpty()) {
+        Compiler c;
+        const QString currentComp = c.detectVersion();
+        if (!currentComp.isEmpty() && compRel.version != currentComp) {
+          parts << tr("compiler %1").arg(compRel.tag);
+        }
+      }
+      sb->setUpdateAvailable(parts.isEmpty() ? QString()
+                                             : tr("⤓ Update available: %1").arg(parts.join(", ")));
+    };
+    connect(UpdateChecker::instance(), &UpdateChecker::releaseFetched, this,
+            [refreshUpdateChip](UpdateChecker::Component, UpdateChecker::Release) { refreshUpdateChip(); });
+    connect(sb, &StatusBar::updateClicked, this, &MainWindow::promptForUpdate);
+  }
+
+  // Restore tabs that were open before a self-update. The installer wrote
+  // PendingReopenFiles right before relaunch; we open them then clear the
+  // key so subsequent normal launches don't reopen stale paths.
+  {
+    QSettings s;
+    const QStringList reopen = s.value("PendingReopenFiles").toStringList();
+    if (!reopen.isEmpty()) {
+      s.remove("PendingReopenFiles");
+      for (const QString& f : reopen) {
+        if (!f.isEmpty() && QFileInfo::exists(f)) tryLoadFile(f);
+      }
+    }
+  }
 }
 
 MainWindow::~MainWindow() {
@@ -185,9 +440,10 @@ QString MainWindow::deprototype(QString func) {
 void MainWindow::loadNativeList() {
   // Declare an invalid symbol for list items that aren't real symbols.
   QListWidgetItem* child;
-  QFont* fileFont = new QFont("Sans Serif", 20, 2);
-  QFont* funcFont = new QFont("Sans Serif", 12, 2);
-  QFont* headFont = new QFont("Sans Serif", 12, 2);
+  // INCLUDES list at ~1.5x the prior sizes.
+  QFont* fileFont = new QFont("Sans Serif", 15, QFont::Bold);
+  QFont* funcFont = new QFont("Sans Serif", 14);
+  QFont* headFont = new QFont("Sans Serif", 14);
   // Loop through all `includes/*.inc` files (ensure they aren't directories).
   QDir includes("./include", "*.inc", QDir::IgnoreCase, QDir::Files | QDir::Readable);
   for (auto const & fileName : includes.entryInfoList()) {
@@ -261,7 +517,7 @@ void MainWindow::loadNativeList() {
               {
                 // first valid entry from this file.  Add the filename too.
                 // Extra scope for `name`.
-                child = new QListWidgetItem("\n" + fileName.fileName() + "\n", ui_->functions);
+                child = new QListWidgetItem(fileName.fileName(), ui_->functions);
                 child->setFont(*fileFont);
                 child->setTextAlignment(4);
                 child->setFlags(child->flags() & ~Qt::ItemIsSelectable & ~Qt::ItemIsEnabled);
@@ -274,7 +530,7 @@ void MainWindow::loadNativeList() {
                 //
                 // Purely for Qawno titles.
                 QString name = QString::fromStdString(std::string(data + idx + 1, (size_t)len - idx - 1));
-                child = new QListWidgetItem("\n" + name + "\n", ui_->functions);
+                child = new QListWidgetItem(name, ui_->functions);
                 child->setFont(*headFont);
                 child->setTextAlignment(4);
                 child->setFlags(child->flags() & ~Qt::ItemIsSelectable & ~Qt::ItemIsEnabled);
@@ -337,6 +593,19 @@ void MainWindow::tabCloseRequested(int index) {
   }
   ui_->tabWidget->setCurrentIndex(index);
   on_actionClose_triggered();
+  // Keep the file watcher in sync — any path no longer open should be removed
+  // so we stop reacting to its external changes.
+  if (!fileWatcher_.files().isEmpty()) {
+    QStringList stillOpen = fileNames_;
+    stillOpen.removeAll(QString());
+    QStringList orphans;
+    for (const QString& p : fileWatcher_.files()) {
+      if (!stillOpen.contains(p)) orphans << p;
+    }
+    if (!orphans.isEmpty()) {
+      fileWatcher_.removePaths(orphans);
+    }
+  }
 }
 
 void MainWindow::currentRowChanged(int index) {
@@ -480,7 +749,28 @@ void MainWindow::on_editor_textChanged() {
       QRect rect = editor->cursorRect();
       popup_ = new QListWidget(editor);
       popup_->setParent(editor);
-      popup_->setGeometry(rect.right() + 60, rect.bottom(), 170, 200);
+      popup_->setObjectName("autoCompletePopup");
+      popup_->setFrameShape(QFrame::NoFrame);
+      const bool dark = effectiveDarkMode();
+      popup_->setStyleSheet(QString(
+          "QListWidget#autoCompletePopup {"
+          "  background: %1; color: %2;"
+          "  border: 1px solid %3; border-radius: 6px;"
+          "  padding: 2px; outline: none;"
+          "  font-family: 'Menlo', 'Monaco', monospace; font-size: 12px;"
+          "}"
+          "QListWidget#autoCompletePopup::item {"
+          "  padding: 3px 8px; border-radius: 4px;"
+          "}"
+          "QListWidget#autoCompletePopup::item:selected {"
+          "  background: %4; color: %5;"
+          "}")
+          .arg(dark ? "#21262D" : "#FFFFFF",
+               dark ? "#C8CDD6" : "#1A1E25",
+               dark ? "#3A3F4B" : "#C8CDD6",
+               dark ? "#324054" : "#CCE0F5",
+               dark ? "#FFFFFF" : "#1A1E25"));
+      popup_->setGeometry(rect.right() + 60, rect.bottom(), 200, 200);
       for (auto const& it : suggestions_) {
         QListWidgetItem* cur = new QListWidgetItem(*it.Name, popup_);
       }
@@ -765,7 +1055,10 @@ void MainWindow::on_actionOpen_triggered() {
 
   QString caption = tr("Open File");
   QString filter = tr("Pawn scripts (*.pwn *.inc)");
-  QStringList fileNames = QFileDialog::getOpenFileNames(this, caption, dir, filter);
+  // Use the native macOS open panel — Qt's fallback dialog looks dated and
+  // doesn't honour Documents access prompts the way AppKit does.
+  QStringList fileNames =
+      QFileDialog::getOpenFileNames(this, caption, dir, filter, nullptr);
 
   int loaded = 0;
   bool close = fileNames_.count() == 1 && isNewFile() && !isFileModified();
@@ -890,7 +1183,7 @@ void MainWindow::on_actionColours_triggered() {
   QColorDialog::setStandardColor( 4, QColor(0x84, 0x77, 0xB7, 0xFF)); // open.mp purple
   QColorDialog::setStandardColor( 5, QColor(0xF0, 0x7B, 0x0F, 0xFF)); // SA-MP orange
 
-  lastColour_ = QColorDialog::getColor(lastColour_, nullptr, QString(), QColorDialog::ShowAlphaChannel | QColorDialog::DontUseNativeDialog);
+  lastColour_ = QColorDialog::getColor(lastColour_, nullptr, QString(), QColorDialog::ShowAlphaChannel);
   if (!lastColour_.isValid()) {
     return;
   }
@@ -958,7 +1251,7 @@ void MainWindow::on_actionComment_triggered() {
       int newStart = text.indexOf('/');
       // Find where the last comment starts.
       int newEnd = text.lastIndexOf(comment);
-      if (text[newEnd] == 0x2029) {
+      if (text[newEnd] == QChar(0x2029)) {
         ++newEnd;
       }
       endBlockLen = text.indexOf(anything, newEnd) - newEnd;
@@ -1010,7 +1303,7 @@ void MainWindow::on_actionComment_triggered() {
       int newStart = text.indexOf(anything);
       // Find where the last line starts.
       int newEnd = text.lastIndexOf(comment);
-      if (text[newEnd] == 0x2029) {
+      if (text[newEnd] == QChar(0x2029)) {
         ++newEnd;
       }
       endBlockLen = text.indexOf(anything, newEnd) - newEnd;
@@ -1033,6 +1326,109 @@ void MainWindow::on_actionComment_triggered() {
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
   int count = ui_->tabWidget->count();
+  // Hover-to-close tab affordance: the tab's leading icon morphs into an X
+  // when the mouse is over that tab; clicking the icon closes the tab.
+  QTabBar* tb = ui_->tabWidget->tabBar();
+  if (watched == tb) {
+    if (event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest) {
+      repositionAddTabBtn();
+    }
+    auto restoreIcon = [this, tb](int idx) {
+      if (idx < 0 || idx >= tb->count()) return;
+      if (idx == markedIndex_) {
+        // Preserve the run-marker check icon.
+        if (auto ed = getCurrentEditor()) {
+          tb->setTabIcon(idx, ed->style()->standardIcon(QStyle::SP_DialogApplyButton));
+        }
+      } else {
+        tb->setTabIcon(idx, QIcon(":/assets/images/icons/new.svg"));
+      }
+    };
+    if (event->type() == QEvent::MouseMove || event->type() == QEvent::HoverMove ||
+        event->type() == QEvent::Enter || event->type() == QEvent::HoverEnter) {
+      QPoint pos;
+      if (auto me = dynamic_cast<QMouseEvent*>(event)) pos = me->pos();
+      else if (auto he = dynamic_cast<QHoverEvent*>(event)) pos = he->position().toPoint();
+      const int idx = tb->tabAt(pos);
+      if (idx != hoveredTabIndex_) {
+        if (hoveredTabIndex_ >= 0) restoreIcon(hoveredTabIndex_);
+        hoveredTabIndex_ = idx;
+        if (idx >= 0) tb->setTabIcon(idx, QIcon(":/assets/images/icons/tab-close.svg"));
+      }
+    } else if (event->type() == QEvent::Leave || event->type() == QEvent::HoverLeave) {
+      if (hoveredTabIndex_ >= 0) {
+        restoreIcon(hoveredTabIndex_);
+        hoveredTabIndex_ = -1;
+      }
+    } else if (event->type() == QEvent::MouseButtonPress) {
+      auto me = static_cast<QMouseEvent*>(event);
+      if (me->button() == Qt::LeftButton) {
+        const int idx = tb->tabAt(me->pos());
+        if (idx >= 0) {
+          const QRect r = tb->tabRect(idx);
+          // Icon sits at the leading edge; ~22px hit zone covers icon + padding.
+          QRect iconHit(r.left(), r.top(), 22, r.height());
+          if (iconHit.contains(me->pos())) {
+            tabCloseRequested(idx);
+            return true;
+          }
+        }
+      }
+    }
+  }
+#ifdef Q_OS_MACOS
+  // Re-show the window when the app is re-activated from the Dock after the
+  // window was closed (hidden) on the home screen.
+  if (event->type() == QEvent::ApplicationActivate && !isVisible()) {
+    show();
+    raise();
+  }
+  // Finder / `open foo.pwn` route here via NSApp → QEvent::FileOpen.
+  if (event->type() == QEvent::FileOpen) {
+    auto foe = static_cast<QFileOpenEvent*>(event);
+    const QString path = foe->file();
+    if (!path.isEmpty()) {
+      tryLoadFile(path);
+      show();
+      raise();
+      activateWindow();
+    }
+    return true;
+  }
+#endif
+  // VS Code-style hover tooltip: when the user hovers over an identifier and
+  // it matches a known symbol (predictions_ map), show a small popup. Disabled
+  // via Settings → General → "Hover tooltips".
+  if (event->type() == QEvent::ToolTip &&
+      QSettings().value("HoverTooltips", true).toBool()) {
+    auto helpEvent = static_cast<QHelpEvent*>(event);
+    EditorWidget* ed = nullptr;
+    for (auto e : editors_) {
+      if (e && e->viewport() == watched) { ed = e; break; }
+    }
+    if (ed) {
+      QTextCursor c = ed->cursorForPosition(helpEvent->pos());
+      c.select(QTextCursor::WordUnderCursor);
+      const QString word = c.selectedText();
+      if (!word.isEmpty() && predictions_.contains(word)) {
+        QToolTip::showText(helpEvent->globalPos(),
+            QString("<div style='padding:2px 4px;'><b>%1</b><br>"
+                    "<span style='color:#888'>known symbol</span></div>")
+                .arg(word.toHtmlEscaped()), ed);
+        return true;
+      } else {
+        QToolTip::hideText();
+      }
+    }
+  }
+  // Click a recent-file label on the welcome page.
+  if (event->type() == QEvent::MouseButtonRelease && watched && watched->isWidgetType()) {
+    QVariant rp = watched->property("recentPath");
+    if (rp.isValid()) {
+      tryLoadFile(rp.toString());
+      return true;
+    }
+  }
   switch (event->type()) {
   case QKeyEvent::KeyPress:
     switch (static_cast<QKeyEvent*>(event)->key()) {
@@ -1181,12 +1577,19 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
       }
       break;
     case Qt::Key_0:
-      // What is DRY code?
       if (static_cast<QKeyEvent*>(event)->modifiers() & Qt::ControlModifier) {
-        // Jump to tab.
-        ui_->tabWidget->setCurrentIndex(9);
-        // Stop propagation.
-        return true;
+        return zoomFocused(0);
+      }
+      break;
+    case Qt::Key_Equal:
+    case Qt::Key_Plus:
+      if (static_cast<QKeyEvent*>(event)->modifiers() & Qt::ControlModifier) {
+        return zoomFocused(+1);
+      }
+      break;
+    case Qt::Key_Minus:
+      if (static_cast<QKeyEvent*>(event)->modifiers() & Qt::ControlModifier) {
+        return zoomFocused(-1);
       }
       break;
     case Qt::Key_Backtab:
@@ -1257,10 +1660,8 @@ void MainWindow::on_actionClose_triggered() {
     editors_.remove(cur);
     fileNames_.removeAt(cur);
     ui_->tabWidget->removeTab(cur);
-
-    if (fileNames_.count() == 0) {
-      on_actionNewGM_triggered();
-    }
+    // Closing the last tab drops to the welcome page (no forced new file).
+    updateWelcomeVisibility();
   }
 
   updateTitle();
@@ -1324,12 +1725,19 @@ void MainWindow::on_actionSave_triggered() {
     return;
   }
 
-  QTextStream output(&file);
-  output.setCodec(QTextCodec::codecForName("Windows-1251"));
-  output << getCurrentEditor()->toPlainText();
+  QString text = getCurrentEditor()->toPlainText();
+  QTextCodec *codec = QTextCodec::codecForName("Windows-1251");
+  file.write(codec ? codec->fromUnicode(text) : text.toUtf8());
   getCurrentEditor()->textChanged();
   setFileModified(false);
+  // Note our own save so the QFileSystemWatcher echo doesn't trigger a reload
+  // dialog. Also re-add the path; some filesystems drop the watch after write.
+  lastSelfSavedPath_ = fileNames_[getCurrentIndex()];
+  lastSelfSaveMs_ = QDateTime::currentMSecsSinceEpoch();
   file.close();
+  if (!fileWatcher_.files().contains(lastSelfSavedPath_)) {
+    fileWatcher_.addPath(lastSelfSavedPath_);
+  }
 }
 
 void MainWindow::on_actionSaveAs_triggered() {
@@ -1338,250 +1746,199 @@ void MainWindow::on_actionSaveAs_triggered() {
 
   QString caption = tr("Save File As");
   QString filter = tr("Pawn scripts (*.pwn *.inc)");
-  QString fileName = QFileDialog::getSaveFileName(this, caption, dir, filter);
+  // Native save panel — same reasoning as Open above.
+  QString fileName =
+      QFileDialog::getSaveFileName(this, caption, dir, filter, nullptr);
 
   if (fileName.isEmpty()) {
     return;
   }
 
+  // Qt's non-native dialog does not append the filter's extension, so a name
+  // typed without one (e.g. "test1") would be saved extensionless and the
+  // compiler then fails ("cannot read ... test1.p"). Default to .pwn.
+  if (QFileInfo(fileName).suffix().isEmpty()) {
+    fileName += ".pwn";
+  }
+
   QFileInfo fileInfo(fileName);
   dir = fileInfo.dir().path();
   settings.setValue("LastSaveDir", dir);
+  addRecentFile(fileName);
 
   ui_->tabWidget->setTabText(getCurrentIndex(), QFileInfo(fileInfo).fileName());
   fileNames_[getCurrentIndex()] = fileName;
   return on_actionSave_triggered();
 }
 
+void MainWindow::ensureFindDialog() {
+  if (findDialog_) {
+    return;
+  }
+  findDialog_ = new FindDialog(this);
+  connect(findDialog_, &FindDialog::findRequested, this, [this]() {
+    findStart_ = getCurrentEditor() ? getCurrentEditor()->textCursor().position() : 0;
+    findRound_ = 0;
+    on_actionFindNext_triggered();
+  });
+  connect(findDialog_, &FindDialog::replaceRequested, this, [this]() {
+    findStart_ = getCurrentEditor() ? getCurrentEditor()->textCursor().position() : 0;
+    findRound_ = 0;
+    on_actionReplaceNext_triggered();
+  });
+  connect(findDialog_, &FindDialog::replaceAllRequested, this, [this]() {
+    findStart_ = getCurrentEditor() ? getCurrentEditor()->textCursor().position() : 0;
+    findRound_ = 0;
+    on_actionReplaceAll_triggered();
+  });
+  findDialog_->applyTheme(effectiveDarkMode());
+}
+
 void MainWindow::on_actionFind_triggered() {
   if (!getCurrentEditor()) {
     return;
   }
-  int found = 0;
-  {
-    FindDialog dialog;
-    dialog.exec();
-    found = dialog.result();
-  }
-  switch (found) {
-  case 1:
-    // "Find".
-    findStart_ = getCurrentEditor()->textCursor().position();
-    findRound_ = 0;
-    on_actionFindNext_triggered();
-    break;
-  case 2:
-    // "Replace".
-    findStart_ = getCurrentEditor()->textCursor().position();
-    findRound_ = 0;
-    on_actionReplaceNext_triggered();
-    break;
-  case 3:
-    // "All".
-    findStart_ = getCurrentEditor()->textCursor().position();
-    findRound_ = 0;
-    on_actionReplaceAll_triggered();
-    break;
-  }
+  ensureFindDialog();
+  findDialog_->clearStatus();
+  findDialog_->show();
+  findDialog_->raise();
+  findDialog_->activateWindow();
+  findDialog_->focusFindField();
 }
 
 void MainWindow::on_actionFindNext_triggered() {
-  if (!getCurrentEditor()) {
+  if (!getCurrentEditor() || !findDialog_) {
+    if (findDialog_) {
+      findDialog_->setStatus(tr("Nothing to search."), /*error=*/true);
+    }
     return;
   }
-  FindDialog dialog;
   QTextDocument::FindFlags flags;
+  if (findDialog_->matchCase())       flags |= QTextDocument::FindCaseSensitively;
+  if (findDialog_->matchWholeWords()) flags |= QTextDocument::FindWholeWords;
+  if (findDialog_->searchBackwards()) flags |= QTextDocument::FindBackward;
 
-  if (dialog.matchCase()) {
-    flags |= QTextDocument::FindCaseSensitively;
-  }
-  if (dialog.matchWholeWords()) {
-    flags |= QTextDocument::FindWholeWords;
-  }
-  if (dialog.searchBackwards()) {
-    flags |= QTextDocument::FindBackward;
+  const QString needle = findDialog_->findWhatText();
+  if (needle.isEmpty()) {
+    findDialog_->setStatus(tr("Enter text to search."), /*error=*/true);
+    return;
   }
 
   QTextCursor current = getCurrentEditor()->textCursor();
   QTextCursor next;
 
-  if (dialog.useRegExp()) {
-    Qt::CaseSensitivity sens = dialog.matchCase()? Qt::CaseSensitive:
-                                                   Qt::CaseInsensitive;
-    QRegExp regexp(dialog.findWhatText(), sens);
+  if (findDialog_->useRegExp()) {
+    auto sens = findDialog_->matchCase() ? QRegularExpression::NoPatternOption
+                                         : QRegularExpression::CaseInsensitiveOption;
+    QRegularExpression regexp(needle, sens);
     next = getCurrentEditor()->document()->find(regexp, current, flags);
   } else {
-    next = getCurrentEditor()->document()->find(dialog.findWhatText(), current, flags);
+    next = getCurrentEditor()->document()->find(needle, current, flags);
   }
 
   bool found = !next.isNull() &&
     (findRound_ == 0 || next.position() < findStart_);
 
   if (!found && findRound_ > 0) {
-    QString string = dialog.findWhatText();
-    QString message = tr("No matching text found for \"%1\".").arg(string);
-    QMessageBox::information(this,
-                              QCoreApplication::applicationName(),
-                              message,
-                              QMessageBox::Ok);
-    findStart_ = next.position();
+    findDialog_->setStatus(tr("No matches for \"%1\".").arg(needle), /*error=*/true);
     findRound_ = 0;
     return;
   }
 
   if (!found && findRound_ == 0) {
+    // Wrap once.
     next = current;
-    if (dialog.searchBackwards()) {
+    if (findDialog_->searchBackwards()) {
       next.movePosition(QTextCursor::End);
     } else {
       next.movePosition(QTextCursor::Start);
     }
+    findRound_++;
+    getCurrentEditor()->setTextCursor(next);
+    on_actionFindNext_triggered();
+    return;
   }
 
   getCurrentEditor()->setTextCursor(next);
-
-  if (!found && findRound_ == 0) {
-    findRound_++;
-    on_actionFindNext_triggered();
-  }
+  findDialog_->setStatus(tr("Match found."));
 }
 
 void MainWindow::on_actionReplaceNext_triggered() {
-  if (!getCurrentEditor()) {
+  if (!getCurrentEditor() || !findDialog_) {
     return;
   }
-  FindDialog dialog;
-  QTextDocument::FindFlags flags;
-
-  if (dialog.matchCase()) {
-    flags |= QTextDocument::FindCaseSensitively;
-  }
-  if (dialog.matchWholeWords()) {
-    flags |= QTextDocument::FindWholeWords;
-  }
-  if (dialog.searchBackwards()) {
-    flags |= QTextDocument::FindBackward;
-  }
-
   QTextCursor current = getCurrentEditor()->textCursor();
-  QTextCursor next;
-
-  if (dialog.useRegExp()) {
-    Qt::CaseSensitivity sens = dialog.matchCase()? Qt::CaseSensitive:
-                                                   Qt::CaseInsensitive;
-    QRegExp regexp(dialog.findWhatText(), sens);
-    next = getCurrentEditor()->document()->find(regexp, current, flags);
-  } else {
-    next = getCurrentEditor()->document()->find(dialog.findWhatText(), current, flags);
-  }
-
-  bool found = !next.isNull() &&
-    (findRound_ == 0 || next.position() < findStart_);
-
-  if (!found && findRound_ > 0) {
-    QString string = dialog.findWhatText();
-    QString message = tr("No matching text found for \"%1\".").arg(string);
-    QMessageBox::information(this,
-                              QCoreApplication::applicationName(),
-                              message,
-                              QMessageBox::Ok);
-    findStart_ = next.position();
-    findRound_ = 0;
+  // If the current selection matches the search term, replace it in place;
+  // otherwise jump to the next match without replacing.
+  const QString needle = findDialog_->findWhatText();
+  if (needle.isEmpty()) {
+    findDialog_->setStatus(tr("Enter text to search."), /*error=*/true);
     return;
   }
-
-  if (!found && findRound_ == 0) {
-    next = current;
-    if (dialog.searchBackwards()) {
-      next.movePosition(QTextCursor::End);
-    } else {
-      next.movePosition(QTextCursor::Start);
-    }
+  if (current.hasSelection() && current.selectedText() == needle) {
+    current.insertText(findDialog_->replaceText());
+    findDialog_->setStatus(tr("Replaced one occurrence."));
   }
-
-  getCurrentEditor()->setTextCursor(next);
-  
-  if (next.hasSelection()) {
-    next.insertText(dialog.replaceText());
-  }
-
-  if (!found && findRound_ == 0) {
-    findRound_++;
-    on_actionReplaceNext_triggered();
-  }
+  findStart_ = getCurrentEditor()->textCursor().position();
+  findRound_ = 0;
+  on_actionFindNext_triggered();
 }
 
 void MainWindow::on_actionReplaceAll_triggered() {
-  if (!getCurrentEditor()) {
+  if (!getCurrentEditor() || !findDialog_) {
     return;
   }
-  FindDialog dialog;
   QTextDocument::FindFlags flags;
-  bool first = true;
+  if (findDialog_->matchCase())       flags |= QTextDocument::FindCaseSensitively;
+  if (findDialog_->matchWholeWords()) flags |= QTextDocument::FindWholeWords;
+  // Replace-all always sweeps forward from the document start.
+  flags &= ~QTextDocument::FindBackward;
 
-  if (dialog.matchCase()) {
-    flags |= QTextDocument::FindCaseSensitively;
-  }
-  if (dialog.matchWholeWords()) {
-    flags |= QTextDocument::FindWholeWords;
-  }
-  if (dialog.searchBackwards()) {
-    flags |= QTextDocument::FindBackward;
+  const QString needle = findDialog_->findWhatText();
+  const QString replacement = findDialog_->replaceText();
+  if (needle.isEmpty()) {
+    findDialog_->setStatus(tr("Enter text to search."), /*error=*/true);
+    return;
   }
 
-  for ( ; ; ) {
-    QTextCursor current = getCurrentEditor()->textCursor();
-    QTextCursor next;
+  auto* editor = getCurrentEditor();
+  QTextCursor sweep(editor->document());
+  sweep.movePosition(QTextCursor::Start);
 
-    if (dialog.useRegExp()) {
-      Qt::CaseSensitivity sens = dialog.matchCase()? Qt::CaseSensitive:
-                                                     Qt::CaseInsensitive;
-      QRegExp regexp(dialog.findWhatText(), sens);
-      next = getCurrentEditor()->document()->find(regexp, current, flags);
+  int count = 0;
+  bool inEditBlock = false;
+  while (true) {
+    QTextCursor hit;
+    if (findDialog_->useRegExp()) {
+      auto sens = findDialog_->matchCase() ? QRegularExpression::NoPatternOption
+                                           : QRegularExpression::CaseInsensitiveOption;
+      QRegularExpression regexp(needle, sens);
+      hit = editor->document()->find(regexp, sweep, flags);
     } else {
-      next = getCurrentEditor()->document()->find(dialog.findWhatText(), current, flags);
+      hit = editor->document()->find(needle, sweep, flags);
     }
-
-    bool found = !next.isNull() &&
-      (findRound_ == 0 || next.position() < findStart_);
-
-    if (!found && findRound_ > 0) {
-      QString string = dialog.findWhatText();
-      QString message = tr("All instances replaced.");
-      QMessageBox::information(this,
-                                QCoreApplication::applicationName(),
-                                message,
-                                QMessageBox::Ok);
-      findStart_ = next.position();
-      findRound_ = 0;
-      return;
+    if (hit.isNull()) {
+      break;
     }
-
-    if (!found && findRound_ == 0) {
-      next = current;
-      if (dialog.searchBackwards()) {
-        next.movePosition(QTextCursor::End);
-      } else {
-        next.movePosition(QTextCursor::Start);
-      }
+    if (!inEditBlock) {
+      hit.beginEditBlock();
+      inEditBlock = true;
+    } else {
+      hit.joinPreviousEditBlock();
     }
+    hit.insertText(replacement);
+    hit.endEditBlock();
+    sweep = hit;
+    ++count;
+  }
 
-    getCurrentEditor()->setTextCursor(next);
-    
-    if (next.hasSelection()) {
-      if (first) {
-        next.beginEditBlock();
-        first = false;
-      } else {
-        next.joinPreviousEditBlock();
-      }
-      next.insertText(dialog.replaceText());
-      next.endEditBlock();
-    }
-
-    if (!found && findRound_ == 0) {
-      findRound_++;
-    }
+  if (count == 0) {
+    findDialog_->setStatus(tr("No matches for \"%1\".").arg(needle), /*error=*/true);
+  } else {
+    findDialog_->setStatus(
+        tr("All \"%1\" replaced with \"%2\" successfully — %3 occurrence(s).")
+            .arg(needle, replacement)
+            .arg(count));
   }
 }
 
@@ -1622,17 +1979,9 @@ void MainWindow::on_actionOutputFont_triggered() {
 }
 
 void MainWindow::on_actionDarkMode_triggered() {
-  QSettings settings;
-  bool useDarkMode = !settings.value("DarkMode", false).toBool();
-  settings.setValue("DarkMode", useDarkMode);
-  for (auto i : editors_) {
-    i->toggleDarkMode(useDarkMode);
-  }
-  if (useDarkMode) {
-    ui_->outerWidget->setPalette(darkModePalette);
-  } else {
-    ui_->outerWidget->setPalette(defaultPalette);
-  }
+  // The Settings-menu item is a plain light/dark toggle; the toolbar button
+  // offers the full System/Light/Dark choice.
+  setThemeMode(effectiveDarkMode() ? 1 : 2);
 }
 
 void MainWindow::on_actionMRU_triggered() {
@@ -1690,21 +2039,411 @@ void MainWindow::on_actionSaveAll_triggered() {
   ui_->tabWidget->setCurrentIndex(cur);
 }
 
-void MainWindow::on_actionCompile_triggered() {
+void MainWindow::runCompile(bool alsoRun) {
   if (fileNames_.isEmpty()) {
     return;
   }
   on_actionSaveAll_triggered();
+  int idx = markedIndex_ == -1 ? getCurrentIndex() : markedIndex_;
+  if (idx < 0 || idx >= fileNames_.size()) {
+    return;
+  }
+  const QString fileName = fileNames_[idx];
+  // New/unsaved files have an empty name; compiling them yields bogus paths.
+  if (fileName.isEmpty()) {
+    QMessageBox::warning(this, QCoreApplication::applicationName(),
+        tr("Save the file before compiling."), QMessageBox::Ok);
+    return;
+  }
+
+#ifdef Q_OS_MACOS
+  // Block compiling unless CrossOver, the bottle, and the project's qawno/
+  // folder (with pawncc.exe + pawnc.dll) exist.
+  if (!macCompilePreflight(fileName)) {
+    return;
+  }
+#endif
+
+  // Deploy the pawn-cc.sh wrapper into <projectDir>/qawno/ — same folder as
+  // pawncc.exe — so the same compile pipeline is reusable from a terminal/CI.
+  const QString qawnoDir = CrossOver::projectQawnoDir(fileName);
+  deployPawnScript(qawnoDir);
+
   Compiler compiler;
-  const QString& fileName = fileNames_[markedIndex_ == -1 ? getCurrentIndex() : markedIndex_];
+  // The default compiler path template (%p/qawno/pawn-cc.sh) assumes a qawno/
+  // folder sits beside the .pwn. Real projects put qawno/ at the project root
+  // (parent of gamemodes/, filterscripts/, includes/), which projectQawnoDir
+  // walks up to find. Pin the compiler to the discovered absolute path so
+  // commandFor doesn't synthesise a non-existent sibling path.
+  const QString deployedScript = qawnoDir + "/pawn-cc.sh";
+  if (QFile::exists(deployedScript)) {
+    compiler.setPath(deployedScript);
+  }
+  const QString command = compiler.commandFor(fileName);
+  const QString shortName = QFileInfo(fileName).fileName();
+
   ui_->output->clear();
   ui_->output->resetErrorCounter();
-  ui_->output->appendPlainText(compiler.commandFor(fileName));
-  ui_->output->appendPlainText("\n");
-  // Force a repaint now, so the command-line is visible during slow compiles.
-  ui_->output->repaint();
-  compiler.run(fileName);
-  ui_->output->appendPlainText(compiler.output());
+  ui_->output->appendPlainText(tr("Compiling %1…").arg(shortName));
+  clearDiagnostics();
+
+  // Disable the Run/Compile actions for the duration.
+  setCompileActionsEnabled(false);
+
+  QProcess *proc = new QProcess(this);
+  proc->setProcessChannelMode(QProcess::MergedChannels);
+  proc->setWorkingDirectory(QDir::currentPath());
+
+  // Hand the script the location of our self-managed wine bundle. WineManager
+  // resolves the same path; setting it on the env keeps the script honest
+  // when /Applications/Qawno.app has been moved or renamed.
+  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+  env.insert("QAWNO_APPDATA", WineManager::instance()->appQawnoDir());
+  // Silence MoltenVK / Vulkan diagnostic spam that wine emits at startup —
+  // unrelated to the actual compile output the user cares about.
+  env.insert("MVK_CONFIG_LOG_LEVEL", "0");
+  env.insert("MVK_DEBUG", "0");
+  env.insert("WINEDEBUG", "-all");
+  proc->setProcessEnvironment(env);
+
+  auto canceled = std::make_shared<bool>(false);
+
+  // When the bottom output panel is visible, drive the compile inline there
+  // (progress bar + Cancel as a strip above the output, log streamed into the
+  // panel). When it's hidden, fall back to a modal popup so the user still sees
+  // progress. inline_ == nullptr means "popup mode".
+  const bool inlineMode = ui_->output->isVisible();
+
+  QProgressBar *bar = new QProgressBar;
+  bar->setRange(0, 100);
+  bar->setValue(0);
+  bar->setFormat(tr("%p%"));
+  bar->setStyleSheet(
+      "QProgressBar { border: 1px solid #C8722A; border-radius: 4px; text-align: center; height: 16px; }"
+      "QProgressBar::chunk { background-color: #F0843C; border-radius: 3px; }");
+  QPushButton *cancelBtn = new QPushButton(
+      QIcon(":/assets/images/icons/close.svg"), tr("Cancel"));
+
+  // log: where streamed output goes. Inline -> the bottom panel; popup -> the
+  // dialog's own text view. strip_/dlg are the host widgets, freed in finish().
+  QPlainTextEdit *log = nullptr;
+  QWidget *strip = nullptr; // inline progress strip in the splitter
+  QDialog *dlg = nullptr;   // popup host
+
+  // Drop any older compile strips still sitting above the output panel —
+  // applies in both inline AND popup modes so a hidden output panel never
+  // hangs onto a stale "Compile failed" strip.
+  for (int i = ui_->splitter->count() - 1; i >= 0; --i) {
+    QWidget* w = ui_->splitter->widget(i);
+    if (w && w->objectName() == "compileStrip") w->deleteLater();
+  }
+
+  if (inlineMode) {
+    // A compact strip (progress + Cancel) inserted above the output panel.
+    strip = new QWidget;
+    strip->setObjectName("compileStrip");
+    QHBoxLayout *sl = new QHBoxLayout(strip);
+    sl->setContentsMargins(6, 4, 6, 4);
+    sl->setSpacing(8);
+    sl->addWidget(bar, 1);
+    sl->addWidget(cancelBtn, 0);
+    int outIdx = ui_->splitter->indexOf(ui_->output);
+    ui_->splitter->insertWidget(outIdx < 0 ? ui_->splitter->count() : outIdx,
+                                strip);
+    log = ui_->output; // stream straight into the bottom panel
+    log->appendPlainText(command + "\n");
+  } else {
+    // Popup mode: vertical stack — header row (title + wrap toggle), progress
+    // bar, rounded log area, full-width close/cancel at the bottom. Stays
+    // on top via Qt::Tool so it doesn't slip behind the editor window.
+    dlg = new QDialog(this);
+    dlg->setWindowTitle(tr("Qawno Compiler"));
+    dlg->setWindowFlags(Qt::Dialog | Qt::CustomizeWindowHint | Qt::WindowTitleHint
+                        | Qt::WindowCloseButtonHint);
+    // Stay-on-top keeps the popup visible while the user clicks back into
+    // the editor to look at a flagged line.
+    dlg->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+    dlg->setWindowModality(Qt::NonModal);
+    dlg->setMinimumSize(640, 380);
+    QVBoxLayout *dl = new QVBoxLayout(dlg);
+    dl->setSpacing(10);
+    dl->setContentsMargins(14, 12, 14, 12);
+
+    // Header row: "Qawno Compiler — <filename.pwn>" left, "Wrap" toggle right.
+    QHBoxLayout *hdrRow = new QHBoxLayout;
+    QLabel* hdrTitle = new QLabel(tr("Qawno Compiler — %1").arg(shortName));
+    hdrTitle->setStyleSheet("font-weight: 600; font-size: 13px;");
+    hdrRow->addWidget(hdrTitle, 1);
+    auto* wrapLabel = new QLabel(tr("Wrap"));
+    wrapLabel->setStyleSheet("color:#B6BDC7;font-size:11px;");
+    hdrRow->addWidget(wrapLabel, 0);
+    auto* wrapToggle = new IosToggle;
+    wrapToggle->setFixedSize(34, 20);
+    // Wrap preference is persisted (Settings → Compiler exposes the same key).
+    wrapToggle->setChecked(QSettings().value("CompilerLogWrap", true).toBool());
+    hdrRow->addWidget(wrapToggle, 0);
+    dl->addLayout(hdrRow);
+
+    // Progress bar directly under the header — indeterminate while running.
+    dl->addWidget(bar);
+
+    // Rounded log area.
+    log = new QPlainTextEdit(dlg);
+    log->setReadOnly(true);
+    log->setLineWrapMode(QPlainTextEdit::WidgetWidth);  // matches wrap=on default
+    log->setFont(ui_->output->font());
+    log->setStyleSheet(
+        "QPlainTextEdit { background: #1B1F25; color: #C8CDD6; "
+        "border: 1px solid #3A3F4B; border-radius: 8px; padding: 6px; }");
+    log->appendPlainText(command + "\n");
+    dl->addWidget(log, 1);
+    log->setLineWrapMode(wrapToggle->isChecked() ? QPlainTextEdit::WidgetWidth
+                                                  : QPlainTextEdit::NoWrap);
+    QObject::connect(wrapToggle, &IosToggle::toggled, log, [log](bool on) {
+      log->setLineWrapMode(on ? QPlainTextEdit::WidgetWidth
+                              : QPlainTextEdit::NoWrap);
+      QSettings().setValue("CompilerLogWrap", on);
+    });
+
+    // Bottom row: Close (left) + Recompile (right). cancelBtn morphs into
+    // Close at finish(); recompile triggers the same runCompile path.
+    QHBoxLayout* bottomRow = new QHBoxLayout;
+    bottomRow->setSpacing(8);
+    cancelBtn->setMinimumHeight(34);
+    bottomRow->addWidget(cancelBtn, 1);
+    auto* recompileBtn = new QPushButton(QIcon(":/assets/images/icons/run.svg"),
+                                          tr("Recompile"));
+    recompileBtn->setMinimumHeight(34);
+    recompileBtn->setCursor(Qt::PointingHandCursor);
+    recompileBtn->setStyleSheet(
+        "QPushButton { border-radius: 8px; padding: 6px 16px; "
+        "background: #1F6E3D; color: white; font-weight: 600; border: none; }"
+        "QPushButton:hover { background: #258049; }");
+    bottomRow->addWidget(recompileBtn, 1);
+    dl->addLayout(bottomRow);
+    connect(recompileBtn, &QPushButton::clicked, this, [this, alsoRun, dlg] {
+      // Close the existing popup first so finish() doesn't fight with the
+      // new compile's strip/dialog setup.
+      if (dlg) { dlg->close(); dlg->deleteLater(); }
+      runCompile(alsoRun);
+    });
+  }
+  // In popup mode the bottom inline strip is redundant — drop it so the
+  // user only sees one progress indicator.
+  if (dlg && strip) {
+    strip->deleteLater();
+    strip = nullptr;
+  }
+
+  connect(cancelBtn, &QPushButton::clicked, proc, [proc, canceled]() {
+    *canceled = true;
+    proc->kill();
+  });
+
+  // Bar runs in indeterminate mode (no crawl timer needed). On completion we
+  // flip the range back to 0..100 + setValue(100) so the "Compiled" / failed
+  // state shows a fully-filled chunk instead of the busy animation.
+  QTimer *timer = new QTimer(this);
+  timer->setInterval(1000);  // kept as a heartbeat-only hook for finish()
+
+  // Safety timeout: a hung pawncc (e.g. a bad include tree) would otherwise
+  // freeze forever. Kill it after 90 s.
+  QTimer *killTimer = new QTimer(this);
+  killTimer->setSingleShot(true);
+  killTimer->setInterval(90000);
+  connect(killTimer, &QTimer::timeout, this, [proc, log, canceled]() {
+    *canceled = true;
+    log->appendPlainText(tr("\n[timed out after 90s — compiler killed]"));
+    proc->kill();
+  });
+
+  // Stream output live to the active log (bottom panel inline, or popup view).
+  // Rewrite "Z:\…\foo.pwn(321) : warning" lines so they show the short path
+  // the user asked for ("foo.pwn(321) : warning" or with the user-prefix
+  // stripped when full paths are enabled in Settings).
+  auto rewriteChunk = [this](QString chunk) {
+    // Strip MoltenVK / Vulkan extension dump that wine pollutes stderr with
+    // on macOS — none of it relates to the Pawn compile and it swamps the
+    // actual diagnostic lines the user cares about.
+    static QRegularExpression vkNoise(
+        R"(((^|\n)\[mvk-[^\n]*\n(?:[ \t][^\n]*\n)*)|((^|\n)\s*(VK_|Metal Shading|GPU Family|Read-Write|GPU memory|GPU device|model:|type:|vendorID:|deviceID:|pipelineCacheUUID:|supports the following|Created VkInstance|The following \d+ Vulkan extensions are supported)[^\n]*))");
+    chunk.remove(vkNoise);
+    static QRegularExpression rx("^(.+?\\.(?:pwn|inc))\\((\\d+)\\)",
+                                  QRegularExpression::MultilineOption);
+    QString out;
+    int last = 0;
+    auto it = rx.globalMatch(chunk);
+    while (it.hasNext()) {
+      QRegularExpressionMatch m = it.next();
+      out += chunk.mid(last, m.capturedStart() - last);
+      out += shortenPath(m.captured(1));
+      out += "(";
+      out += m.captured(2);
+      out += ")";
+      last = m.capturedEnd();
+    }
+    out += chunk.mid(last);
+    return out;
+  };
+  connect(proc, &QProcess::readyRead, this, [this, proc, log, bar, rewriteChunk]() {
+    QString chunk = QString::fromLocal8Bit(proc->readAll());
+    if (chunk.isEmpty()) {
+      return;
+    }
+    // Diagnostics: parse "<path>(line) : error|warning" lines and decorate
+    // the matching editor with a wavy underline. Gated by the LintSquiggles
+    // setting (Settings → General).
+    if (QSettings().value("LintSquiggles", true).toBool()) {
+      static QRegularExpression diagRx(
+          R"((^|\n)\s*(.+?\.(?:pwn|inc))\((\d+)\)\s*:\s*(error|warning))",
+          QRegularExpression::CaseInsensitiveOption);
+      auto it = diagRx.globalMatch(chunk);
+      while (it.hasNext()) {
+        auto m = it.next();
+        applyDiagnostic(m.captured(2), m.captured(3).toInt(),
+                        m.captured(4).compare("error", Qt::CaseInsensitive) == 0);
+      }
+    }
+    chunk = rewriteChunk(chunk);
+    log->moveCursor(QTextCursor::End);
+    log->insertPlainText(chunk);
+    log->moveCursor(QTextCursor::End);
+
+    // Stage-based progress estimator. pawncc emits no percentage, so we map
+    // recognisable banner lines to fixed waypoints (10 / 50 / 80 / 95) and
+    // bump the bar a touch per diagnostic in between for a sense of motion.
+    int next = bar->value();
+    if (chunk.contains("Compiling ") && next < 10) next = 10;
+    static QRegularExpression diagInc(
+        R"(\.(pwn|inc)\(\d+\)\s*:\s*(error|warning|fatal))",
+        QRegularExpression::CaseInsensitiveOption);
+    auto it = diagInc.globalMatch(chunk);
+    while (it.hasNext()) { it.next(); if (next < 75) next += 2; }
+    if (chunk.contains("Pawn compiler ") && next < 80) next = 80;
+    if (chunk.contains("Header size:") && next < 90) next = 90;
+    if (chunk.contains("Total requirements:") && next < 95) next = 95;
+    if (chunk.contains("Done.") && next < 98) next = 98;
+    if (next > bar->value()) bar->setValue(next);
+  });
+
+  // Single cleanup, guarded so finished/errorOccurred can't run it twice. On
+  // failure the popup stays open (so the error is readable) and is given a
+  // Close button; the inline strip is always removed but the panel keeps its
+  // log. The compiler actions are always re-enabled.
+  auto guard = std::make_shared<bool>(false);
+  auto finish = [this, proc, dlg, strip, bar, cancelBtn, log, timer, killTimer,
+                 alsoRun, guard, canceled](bool failedToStart) {
+    if (*guard) {
+      return;
+    }
+    *guard = true;
+    timer->stop();
+    killTimer->stop();
+    QString tail = QString::fromLocal8Bit(proc->readAll());
+    if (failedToStart) {
+      tail += "\n" + proc->errorString();
+    }
+    if (!tail.trimmed().isEmpty()) {
+      // Rewrite paths in the tail too — same logic as the streaming chunk.
+      static QRegularExpression tx("^(.+?\\.(?:pwn|inc))\\((\\d+)\\)",
+                                    QRegularExpression::MultilineOption);
+      QString out;
+      int last = 0;
+      auto it = tx.globalMatch(tail);
+      while (it.hasNext()) {
+        auto m = it.next();
+        out += tail.mid(last, m.capturedStart() - last);
+        out += shortenPath(m.captured(1));
+        out += "(";
+        out += m.captured(2);
+        out += ")";
+        last = m.capturedEnd();
+      }
+      out += tail.mid(last);
+      log->moveCursor(QTextCursor::End);
+      log->insertPlainText(out);
+      log->moveCursor(QTextCursor::End);
+    }
+    bar->setValue(100);
+    const bool ok = !*canceled && !failedToStart &&
+                    proc->exitStatus() == QProcess::NormalExit &&
+                    proc->exitCode() == 0;
+    // Status label inside the progress bar ("Compiled" / "Failed" / "Cancelled")
+    // instead of "100%". Tint the chunk by outcome so the user can read the
+    // status without scanning the log.
+    bar->setFormat(*canceled ? tr("Cancelled")
+                              : (ok ? tr("Compiled") : tr("Compile failed")));
+    bar->setStyleSheet(QString(
+        "QProgressBar { border: 1px solid %1; border-radius: 4px; "
+        "text-align: center; height: 16px; color: %2; font-weight: 600; }"
+        "QProgressBar::chunk { background-color: %3; border-radius: 3px; }")
+        .arg(ok ? "#2E8B5A" : (*canceled ? "#8B6F2E" : "#9A2A2A"),
+             ok ? "#FFFFFF" : "#FFFFFF",
+             ok ? "#3CB371" : (*canceled ? "#D8A23C" : "#D04848")));
+    log->appendPlainText(*canceled ? tr("Cancelled.")
+                                    : (ok ? tr("Done.") : tr("Compile failed.")));
+
+    // Inline strip stays visible (with "Compiled" label) so the result is
+    // readable; clicking the button after completion dismisses the strip.
+    if (strip) {
+      cancelBtn->disconnect();
+      cancelBtn->setText(tr("Dismiss"));
+      cancelBtn->setIcon(QIcon(":/assets/images/icons/close.svg"));
+      cancelBtn->setEnabled(true);
+      connect(cancelBtn, &QPushButton::clicked, strip, [strip]() {
+        strip->deleteLater();
+      });
+    }
+
+    if (dlg) {
+      // Popup stays on screen regardless of outcome. The bottom button
+      // switches from Cancel to Close so the user dismisses it manually.
+      cancelBtn->disconnect();
+      cancelBtn->setText(tr("Close"));
+      cancelBtn->setIcon(QIcon(":/assets/images/icons/close.svg"));
+      cancelBtn->setEnabled(true);
+      connect(cancelBtn, &QPushButton::clicked, dlg, [dlg]() {
+        dlg->close();
+        dlg->deleteLater();
+      });
+    }
+
+    proc->deleteLater();
+    timer->deleteLater();
+    killTimer->deleteLater();
+    setCompileActionsEnabled(true);
+    // The legacy alsoRun path launched the open.mp server after compile.
+    // Qawno is just a Pawn editor/compiler — server launch lives elsewhere.
+    (void)alsoRun;
+  };
+
+  connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+          this, [finish](int, QProcess::ExitStatus) { finish(false); });
+  connect(proc, &QProcess::errorOccurred, this,
+          [finish](QProcess::ProcessError) { finish(true); });
+
+  timer->start();
+  killTimer->start();
+  if (dlg) {
+    dlg->show();
+  }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  proc->startCommand(command, QProcess::ReadOnly);
+#else
+  proc->start(command, QProcess::ReadOnly);
+#endif
+  // Close stdin so a compiler that prompts gets EOF instead of blocking.
+  proc->closeWriteChannel();
+}
+
+void MainWindow::setCompileActionsEnabled(bool on) {
+  ui_->actionCompile->setEnabled(on);
+  ui_->actionCompileRun->setEnabled(on);
+  ui_->actionRun->setEnabled(on);
+}
+
+void MainWindow::on_actionCompile_triggered() {
+  runCompile(false);
 }
 
 void MainWindow::errorClicked() {
@@ -1714,21 +2453,39 @@ void MainWindow::errorClicked() {
   }
   cursor.movePosition(QTextCursor::StartOfBlock, QTextCursor::MoveAnchor);
   cursor.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
-  // Example:
-  //
-  //   D:\open.mp\gamemodes\independence.pwn(9) : warning 203: symbol is never used: "warning"
-  //
+  // Example formats:
+  //   D:\open.mp\gamemodes\independence.pwn(9) : warning 203: …
+  //   zombie.pwn(9) : warning 203: …          (after path shortening)
+  //   /Documents/Projects/foo/bar.pwn(9) : …  (user-prefix stripped)
   QRegularExpression message("^(.*?)\\((\\d+)\\)");
   QString text = cursor.selectedText();
   QRegularExpressionMatch match = message.match(text);
-  if (match.hasMatch()) {
-    QString fileName = match.captured(1);
-    QString line = match.captured(2);
-    ui_->output->setTextCursor(cursor);
-    // Normalise the filename so we can compare it to open tabs.
-    QFileInfo info(fileName);
-    jumpToLine(info.absoluteFilePath(), line.toInt());
+  if (!match.hasMatch()) {
+    return;
   }
+  QString fileName = match.captured(1);
+  QString line = match.captured(2);
+  ui_->output->setTextCursor(cursor);
+
+  // Try open tabs first: shortened forms ("zombie.pwn" or "/Documents/…")
+  // won't resolve via absoluteFilePath but should match the basename or a
+  // trailing-substring of an open file's path.
+  QString matched;
+  QString needleBase = QFileInfo(fileName).fileName();
+  for (const QString& open : fileNames_) {
+    if (open.isEmpty()) continue;
+    if (open == fileName) { matched = open; break; }
+    if (QFileInfo(open).fileName() == needleBase) {
+      // Prefer an exact tail match over a basename collision.
+      if (matched.isEmpty() || open.endsWith(fileName)) {
+        matched = open;
+      }
+    }
+  }
+  if (matched.isEmpty()) {
+    matched = QFileInfo(fileName).absoluteFilePath();
+  }
+  jumpToLine(matched, line.toInt());
 }
 
 void MainWindow::on_actionMark_triggered() {
@@ -1750,9 +2507,87 @@ void MainWindow::on_actionRun_triggered() {
   server_.run(fileNames_[markedIndex_ == -1 ? getCurrentIndex() : markedIndex_]);
 }
 
+void MainWindow::promptForUpdate() {
+  auto* uc = UpdateChecker::instance();
+  const auto qawnoRel = uc->latest(UpdateChecker::Component::Qawno);
+  if (qawnoRel.version.isEmpty()) return;  // nothing to install
+
+  // Collect dirty buffers — tab title (with file name) is enough context
+  // for the user; we'll iterate the same indices to save/discard later.
+  QStringList unsaved;
+  for (int i = 0; i < editors_.size(); ++i) {
+    if (editors_[i]->document()->isModified()) {
+      unsaved << ui_->tabWidget->tabText(i);
+    }
+  }
+
+  UpdatePromptDialog dlg(unsaved, qawnoRel.tag, this);
+  dlg.exec();
+  switch (dlg.outcome()) {
+    case UpdatePromptDialog::Postpone:
+      return;
+    case UpdatePromptDialog::ProceedSave:
+      on_actionSaveAll_triggered();
+      break;
+    case UpdatePromptDialog::ProceedDiscard:
+      // Mark every dirty doc clean so the close path doesn't re-prompt.
+      for (auto* e : editors_) e->document()->setModified(false);
+      break;
+    case UpdatePromptDialog::ProceedNoUnsaved:
+      break;
+  }
+
+  Installer::Plan plan;
+  plan.qawnoAssetPath    = uc->downloadedPath(UpdateChecker::Component::Qawno);
+  plan.compilerAssetPath = uc->downloadedPath(UpdateChecker::Component::Compiler);
+
+  // Resolve the project's qawno/ dir for compiler replacement. Compiler::path
+  // is "%p/qawno/pawn-cc.sh" by default; the parent of that resolved path is
+  // the directory we want to drop the new pawncc into.
+  if (!plan.compilerAssetPath.isEmpty()) {
+    Compiler c;
+    QString cmdPath = c.path();
+    // We need a real project context (%p), so use the currently active file.
+    if (!fileNames_.isEmpty()) {
+      const QString in = fileNames_[getCurrentIndex()];
+      const QString p  = QFileInfo(in).absolutePath();
+      const QString o  = QFileInfo(in).baseName();
+      cmdPath.replace("%p", p).replace("%o", o)
+             .replace("%q", QCoreApplication::applicationDirPath());
+      plan.compilerTargetDir = QFileInfo(cmdPath).absolutePath();
+    } else {
+      // No open project: skip compiler install rather than guessing.
+      plan.compilerAssetPath.clear();
+    }
+  }
+
+  // Nothing to install — kick off downloads instead of quitting.
+  if (plan.qawnoAssetPath.isEmpty() && plan.compilerAssetPath.isEmpty()) {
+    uc->downloadAsset(UpdateChecker::Component::Qawno);
+    uc->downloadAsset(UpdateChecker::Component::Compiler);
+    QMessageBox::information(this, tr("Update"),
+        tr("Downloading the update in the background. Try again in a moment."));
+    return;
+  }
+
+  if (SettingsDialog::reopenFilesAfterUpdate()) {
+    for (const QString& f : fileNames_) {
+      if (!f.isEmpty()) plan.reopenFiles << f;
+    }
+  }
+
+  if (!Installer::startUpdate(plan)) {
+    QMessageBox::warning(this, tr("Update"),
+        tr("Couldn't start the installer. The download is saved here:\n%1")
+            .arg(plan.qawnoAssetPath.isEmpty() ? plan.compilerAssetPath
+                                                : plan.qawnoAssetPath));
+    return;
+  }
+  QCoreApplication::quit();
+}
+
 void MainWindow::on_actionCompileRun_triggered() {
-  on_actionCompile_triggered();
-  on_actionRun_triggered();
+  runCompile(true);
 }
 
 void MainWindow::on_actionNextErr_triggered() {
@@ -1780,10 +2615,38 @@ void MainWindow::on_editor_cursorPositionChanged() {
   int line = cursor.blockNumber() + 1;
   int column = cursor.columnNumber() + 1;
   int selected = cursor.selectionEnd() - cursor.selectionStart();
-  dynamic_cast<StatusBar*>(statusBar())->setCursorPosition(line, column, selected);
+  int docLen = getCurrentEditor()->document()->characterCount() - 1;
+  bool allSelected = selected > 0 && selected >= docLen;
+  dynamic_cast<StatusBar*>(statusBar())->setCursorPosition(line, column, selected, allSelected);
+  updateFileInfo();
+}
+
+void MainWindow::updateFileInfo() {
+  StatusBar* sb = dynamic_cast<StatusBar*>(statusBar());
+  if (!sb) {
+    return;
+  }
+  EditorWidget* editor = getCurrentEditor();
+  if (!editor) {
+    sb->setFileInfo(0, 0, false);
+    return;
+  }
+  QString text = editor->toPlainText();
+  int lines = editor->document()->blockCount();
+  qint64 bytes = text.toUtf8().size();
+  sb->setFileInfo(lines, bytes, true);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
+#ifdef Q_OS_MACOS
+  // macOS: closing the window when no files are open hides the app but keeps
+  // it alive in the Dock (standard mac behavior). Quit is Cmd+Q / Dock menu.
+  if (editors_.isEmpty()) {
+    hide();
+    event->ignore();
+    return;
+  }
+#endif
   on_actionQuit_triggered();
   if (isFileEmpty()) {
     event->accept();
@@ -1792,16 +2655,49 @@ void MainWindow::closeEvent(QCloseEvent *event) {
   }
 }
 
+void MainWindow::resizeEvent(QResizeEvent *event) {
+  QMainWindow::resizeEvent(event);
+  // Auto-collapse the INCLUDES sidebar when the window gets too narrow to hold
+  // both it and a usable editor (mirrors how the log can be hidden).
+  if (sidebarPane_ && !editors_.isEmpty()) {
+    const bool tooNarrow = width() < 820;
+    if (tooNarrow && sidebarPane_->isVisible()) {
+      sidebarPane_->setVisible(false);
+    } else if (!tooNarrow && !sidebarPane_->isVisible() && sidebarAutoHidden_) {
+      sidebarPane_->setVisible(true);
+    }
+    if (tooNarrow) {
+      sidebarAutoHidden_ = true;
+    } else if (sidebarPane_->isVisible()) {
+      sidebarAutoHidden_ = false;
+    }
+  }
+  // Responsive toolbar: collapse labels when the window is narrow.
+  applyToolbarStyle();
+}
+
+// Only accept .pwn / .inc files (pawn source + include). Other types (images,
+// arbitrary text, binaries) are not openable by this editor and dragging them
+// in by mistake used to land them in the Recents list — block them up-front.
+static bool isPawnFile(const QString& path) {
+  const QString lower = path.toLower();
+  return lower.endsWith(".pwn") || lower.endsWith(".inc");
+}
+
 void MainWindow::dragEnterEvent(QDragEnterEvent *event) {
-  if (event->mimeData()->hasUrls()) {
-    event->acceptProposedAction();
+  if (!event->mimeData()->hasUrls()) return;
+  for (const QUrl& u : event->mimeData()->urls()) {
+    if (u.isLocalFile() && isPawnFile(u.toLocalFile())) {
+      event->acceptProposedAction();
+      return;
+    }
   }
 }
 
 void MainWindow::dropEvent(QDropEvent *event) {
   QList<QUrl> urls = event->mimeData()->urls();
   foreach (QUrl url, urls) {
-    if (url.isLocalFile()) {
+    if (url.isLocalFile() && isPawnFile(url.toLocalFile())) {
       loadFile(url.toLocalFile());
     }
   }
@@ -1884,18 +2780,82 @@ bool MainWindow::loadFile(const QString &fileName, const char* encoding) {
     return false;
   }
 
-  QTextStream input(&file);
-  input.setCodec(QTextCodec::codecForName(encoding));
+  QByteArray raw = file.readAll();
+  QTextCodec *codec = QTextCodec::codecForName(encoding);
+  QString contents = codec ? codec->toUnicode(raw) : QString::fromUtf8(raw);
 
   fileNames_.push_back(nu ? "" : fileName);
+  if (!nu) {
+    addRecentFile(fileName);
+    if (!fileWatcher_.files().contains(fileName)) {
+      fileWatcher_.addPath(fileName);
+    }
+  }
   QString path = nu ? QString("New %1").arg(++newCount_) : fileName;
   createTab(nu ? path : file.fileName(), path);
-  editors_.last()->setPlainText(input.readAll());
+  editors_.last()->setPlainText(contents);
   parseFile(editors_.last()->toPlainText(), true);
   setFileModified(false);
   file.close();
 
   return true;
+}
+
+void MainWindow::fileChangedExternally(const QString& path) {
+  // Some editors (and our own save) write atomically (write-temp-then-rename),
+  // which causes QFileSystemWatcher to drop the path. Re-add it after a beat
+  // so we keep getting notifications.
+  QTimer::singleShot(150, this, [this, path] {
+    if (QFile::exists(path) && !fileWatcher_.files().contains(path)) {
+      fileWatcher_.addPath(path);
+    }
+  });
+
+  // Ignore the watcher echo of our own save (within ~600 ms).
+  const qint64 now = QDateTime::currentMSecsSinceEpoch();
+  if (path == lastSelfSavedPath_ && now - lastSelfSaveMs_ < 600) {
+    return;
+  }
+
+  // Find the tab(s) hosting this path. fileNames_ is parallel to editors_.
+  for (int i = 0; i < fileNames_.size(); ++i) {
+    if (fileNames_[i] != path) continue;
+    EditorWidget* editor = (i < editors_.size()) ? editors_[i] : nullptr;
+    if (!editor) continue;
+
+    auto reload = [this, editor, path] {
+      QFile f(path);
+      if (!f.open(QIODevice::ReadOnly)) return;
+      QByteArray raw = f.readAll();
+      QTextCodec* codec = QTextCodec::codecForName("Windows-1251");
+      QString contents = codec ? codec->toUnicode(raw) : QString::fromUtf8(raw);
+      // Preserve cursor position roughly.
+      int pos = editor->textCursor().position();
+      QTextCursor cur = editor->textCursor();
+      cur.select(QTextCursor::Document);
+      cur.insertText(contents);
+      QTextCursor restore = editor->textCursor();
+      restore.setPosition(qMin(pos, (int)contents.length()));
+      editor->setTextCursor(restore);
+      editor->document()->setModified(false);
+      updateTitle();
+    };
+
+    const bool dirty = editor->document()->isModified();
+    if (!dirty) {
+      reload();
+    } else {
+      // Conflict: ask before discarding local edits.
+      QMessageBox::StandardButton choice = QMessageBox::question(this,
+          tr("File changed on disk"),
+          tr("\"%1\" was modified outside Qawno but you have unsaved edits.\n\n"
+             "Reload from disk (discard your edits)?").arg(QFileInfo(path).fileName()),
+          QMessageBox::Yes | QMessageBox::No);
+      if (choice == QMessageBox::Yes) {
+        reload();
+      }
+    }
+  }
 }
 
 bool MainWindow::isNewFile() const {
@@ -1919,7 +2879,7 @@ bool MainWindow::isFileEmpty() const {
   }
   QTextDocument *document = editors_[getCurrentIndex()]->document();
   return document->isEmpty()
-    || (isNewFile() && !document->toPlainText().contains(QRegExp("\\S")));
+    || (isNewFile() && !document->toPlainText().contains(QRegularExpression("\\S")));
 }
 
 void MainWindow::createTab(const QString& title, const QString& tooltip) {
@@ -1927,7 +2887,7 @@ void MainWindow::createTab(const QString& title, const QString& tooltip) {
   QWidget* tab = new QWidget();
   QHBoxLayout* horizontalLayout = new QHBoxLayout(tab);
   horizontalLayout->setObjectName(QString::fromUtf8("horizontalLayout"));
-  horizontalLayout->setMargin(0);
+  horizontalLayout->setContentsMargins(0, 0, 0, 0);
   EditorWidget* editor = new EditorWidget(tab);
   editor->setObjectName(QString::fromUtf8("editor"));
   QSizePolicy sizePolicy2(QSizePolicy::Expanding, QSizePolicy::Expanding);
@@ -1941,13 +2901,1757 @@ void MainWindow::createTab(const QString& title, const QString& tooltip) {
   int idx = ui_->tabWidget->indexOf(tab);
   ui_->tabWidget->setTabText(idx, title);
   ui_->tabWidget->setTabToolTip(idx, tooltip);
-  bool useDarkMode = ui_->actionDarkMode->isChecked();
-  editor->toggleDarkMode(useDarkMode);
+  ui_->tabWidget->setTabIcon(idx, QIcon(":/assets/images/icons/new.svg"));
+  editor->toggleDarkMode(effectiveDarkMode());
   editors_.push_back(editor);
   editor->focusWidget();
   connect(editor, SIGNAL(textChanged()), SLOT(on_editor_textChanged()));
   connect(editor, SIGNAL(cursorPositionChanged()), SLOT(on_editor_cursorPositionChanged()));
   ui_->tabWidget->setCurrentIndex(ui_->tabWidget->count() - 1);
   editor->setFocus(Qt::OtherFocusReason);
+  updateWelcomeVisibility();
 }
+
+void MainWindow::zoomEditor(int delta) {
+  static constexpr int kDefaultFontSize = 13;
+  for (auto editor : editors_) {
+    QFont f = editor->font();
+    int newSize = delta == 0 ? kDefaultFontSize
+                             : qBound(6, f.pointSize() + delta, 72);
+    f.setPointSize(newSize);
+    editor->setFont(f);
+  }
+}
+
+// Zoom whichever pane has focus: the code editor or the output log. Returns
+// true if it handled the key (so the shortcut is swallowed). Does nothing when
+// focus is elsewhere / no editor is open.
+bool MainWindow::zoomFocused(int delta) {
+  QWidget* fw = QApplication::focusWidget();
+  // Output log focused?
+  if (fw && (fw == ui_->output || ui_->output->isAncestorOf(fw))) {
+    static constexpr int kOutDefault = 11;
+    QFont f = ui_->output->font();
+    int sz = delta == 0 ? kOutDefault : qBound(6, f.pointSize() + delta, 72);
+    f.setPointSize(sz);
+    ui_->output->setFont(f);
+    return true;
+  }
+  // Code editor focused?
+  EditorWidget* editor = getCurrentEditor();
+  if (editor && (fw == editor || editor->isAncestorOf(fw))) {
+    zoomEditor(delta);
+    return true;
+  }
+  // Focus elsewhere: do nothing (but still swallow so it doesn't misfire).
+  return false;
+}
+
+void MainWindow::buildTopControls() {
+  // "TABS" section label in the tab bar's top-left corner.
+  QWidget* leftCorner = new QWidget(ui_->tabWidget);
+  // Min height matches the tab strip so the inner layout has room to centre
+  // the icon + label vertically instead of hugging the top edge.
+  leftCorner->setMinimumHeight(42);
+  QHBoxLayout* leftLay = new QHBoxLayout(leftCorner);
+  leftLay->setContentsMargins(10, 0, 8, 0);
+  leftLay->setSpacing(6);
+  leftLay->setAlignment(Qt::AlignVCenter);
+  QLabel* tabsIcon = new QLabel(leftCorner);
+  tabsIcon->setPixmap(QIcon(":/assets/images/icons/panel.svg").pixmap(14, 14));
+  leftLay->addWidget(tabsIcon, 0, Qt::AlignVCenter);
+  QLabel* tabsLabel = new QLabel(tr("TABS"), leftCorner);
+  tabsLabel->setObjectName("tabsLabel");
+  leftLay->addWidget(tabsLabel, 0, Qt::AlignVCenter);
+  ui_->tabWidget->setCornerWidget(leftCorner, Qt::TopLeftCorner);
+
+  // Action buttons live in a full-width strip mounted as a top QToolBar on
+  // the main window. They sit above the splitter, flush against the right
+  // edge of the WINDOW (not just the editor pane).
+  topToolbar_ = new QWidget(this);
+  topToolbar_->setObjectName("topToolbar");
+  topToolbar_->setMinimumHeight(42);
+  topToolbar_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  QHBoxLayout* lay = new QHBoxLayout(topToolbar_);
+  lay->setContentsMargins(8, 4, 8, 4);
+  lay->setSpacing(4);
+  lay->setAlignment(Qt::AlignVCenter);
+
+  // "+" new-tab button is parented to the tabBar itself and manually
+  // repositioned (see repositionAddTabBtn) so it sits flush right of the
+  // rightmost tab — Qt's corner widgets anchor to the far edge, which would
+  // leave a gap when tabs don't fill the bar.
+  addTabBtn_ = new QToolButton(ui_->tabWidget->tabBar());
+  addTabBtn_->setObjectName("addTabBtn");
+  addTabBtn_->setText("+");
+  addTabBtn_->setCursor(Qt::PointingHandCursor);
+  addTabBtn_->setToolTip(tr("New blank script"));
+  connect(addTabBtn_, &QToolButton::clicked, this, [this] { on_actionNewBlank_triggered(); });
+  addTabBtn_->show();
+  repositionAddTabBtn();
+
+  // Build every toolbar button through a single factory so the global
+  // "show text" toggle (in Settings) can flip them all between text+icon and
+  // icon-only. Each button keeps its objectName "toolBtn" for stylesheet
+  // targeting (rounded border, hover state).
+  auto makeButton = [this](const QString& label, const QString& iconPath,
+                            const QString& tip,
+                            std::function<void()> onClick,
+                            QAction* act = nullptr) {
+    QToolButton* b = new QToolButton(this);
+    b->setObjectName("toolBtn");
+    if (act) {
+      act->setIcon(QIcon(iconPath));
+      b->setDefaultAction(act);
+    } else if (!iconPath.isEmpty()) {
+      b->setIcon(QIcon(iconPath));
+    }
+    b->setText(label);
+    b->setIconSize(QSize(16, 16));
+    b->setToolTip(tip);
+    b->setCursor(Qt::PointingHandCursor);
+    b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    if (onClick) {
+      connect(b, &QToolButton::clicked, this, onClick);
+    }
+    toolbarButtons_.append(b);
+    return b;
+  };
+
+  // Left-side menu buttons: File + Edit (replaces the native macOS menu bar
+  // entries). Each one opens a popup menu mirroring the original menubar
+  // structure (File: new/open/save/quit, Edit: undo/redo/cut/copy/paste/etc).
+  auto makeMenuButton = [this](const QString& label, const QString& iconPath,
+                                 QMenu* menu) {
+    QToolButton* b = new QToolButton(this);
+    // Dual objectName: still picked up by the existing `toolBtn` QSS rules,
+    // PLUS a `menuBtn` marker so we can override menu-arrow visibility in
+    // the toolbar stylesheet (we WANT the chevron here, unlike action btns).
+    b->setObjectName("menuBtn");
+    b->setProperty("class", "toolBtn menuBtn");
+    b->setText(label);
+    b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    b->setIconSize(QSize(16, 16));
+    if (!iconPath.isEmpty()) b->setIcon(QIcon(iconPath));
+    b->setCursor(Qt::PointingHandCursor);
+    b->setPopupMode(QToolButton::MenuButtonPopup);  // shows the chevron
+    b->setMenu(menu);
+    toolbarButtons_.append(b);
+    return b;
+  };
+  auto* fileBtn = makeMenuButton(tr("File"), ":/assets/images/icons/file-menu.svg",
+                                  ui_->menuFile);
+  auto* editBtn = makeMenuButton(tr("Edit"), ":/assets/images/icons/edit.svg",
+                                  ui_->menuEdit);
+  // File + Edit are the user's main menu access; collapsing them to icons is
+  // confusing (no obvious "menu" affordance), so opt them out of the responsive
+  // narrow-window collapse handled by applyToolbarStyle().
+  fileBtn->setProperty("keepLabel", true);
+  editBtn->setProperty("keepLabel", true);
+  lay->addWidget(fileBtn);
+  lay->addWidget(editBtn);
+
+  auto actionButton = [this, &makeButton](QAction* act, const QString& label,
+                             const QString& iconPath) {
+    QToolButton* b = makeButton(label, iconPath, label, nullptr, act);
+    return b;
+  };
+
+  // Hide the native menubar entries we just promoted into the toolbar. The
+  // app menu (Qawno / Help) stays as macOS requires it.
+  menuBar()->removeAction(ui_->menuFile->menuAction());
+  menuBar()->removeAction(ui_->menuEdit->menuAction());
+  menuBar()->removeAction(ui_->menuBuild->menuAction());
+  menuBar()->removeAction(ui_->menuSettings->menuAction());
+
+  // Stretch BEFORE the right-side controls so File/Edit hug the left edge.
+  lay->addStretch(1);
+
+  // Compile (right side).
+  lay->addWidget(actionButton(ui_->actionCompile, tr("Compile"),
+                              ":/assets/images/icons/run.svg"));
+
+  // Search button — toggles the inline find bar. Sits to the right of
+  // Compile per the new layout request.
+  lay->addWidget(makeButton(tr("Search"), ":/assets/images/icons/search.svg",
+                             tr("Find (inline bar)"),
+                             [this] { toggleInlineFindBar(); }));
+
+  // Appearance toggle: single click cycles System → Light → Dark. The button
+  // shows the current mode's icon + name (no dropdown anymore).
+  themeButton_ = new QToolButton(this);
+  themeButton_->setObjectName("toolBtn");
+  themeButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+  themeButton_->setIconSize(QSize(16, 16));
+  themeButton_->setCursor(Qt::PointingHandCursor);
+  themeButton_->setToolTip(tr("Click to cycle System / Light / Dark"));
+  toolbarButtons_.append(themeButton_);
+  // Keep these QActions around so menuTheme still works (System/Light/Dark
+  // entries in the menu bar).
+  themeSystemAct_ = new QAction(QIcon(":/assets/images/icons/theme-system.svg"), tr("System"), this);
+  themeLightAct_  = new QAction(QIcon(":/assets/images/icons/theme-light.svg"),  tr("Light"),  this);
+  themeDarkAct_   = new QAction(QIcon(":/assets/images/icons/theme-dark.svg"),   tr("Dark"),   this);
+  for (QAction* a : { themeSystemAct_, themeLightAct_, themeDarkAct_ }) {
+    a->setCheckable(true);
+  }
+  connect(themeSystemAct_, &QAction::triggered, this, [this] { setThemeMode(0); });
+  connect(themeLightAct_,  &QAction::triggered, this, [this] { setThemeMode(1); });
+  connect(themeDarkAct_,   &QAction::triggered, this, [this] { setThemeMode(2); });
+  connect(themeButton_, &QToolButton::clicked, this, [this] {
+    setThemeMode((themeMode_ + 1) % 3);
+  });
+  updateThemeButton();
+  lay->addWidget(themeButton_);
+
+  // Mirror the System/Light/Dark choice in the menu bar.
+  ui_->menuTheme->addAction(themeSystemAct_);
+  ui_->menuTheme->addAction(themeLightAct_);
+  ui_->menuTheme->addAction(themeDarkAct_);
+
+  // Settings button — opens the unified Settings window.
+  lay->addWidget(makeButton(tr("Settings"), ":/assets/images/icons/settings.svg",
+                             tr("Settings"),
+                             [this] { on_actionSettings_triggered(); }));
+
+  // Sidebar + Output panel toggles. Icon-only (no text) regardless of the
+  // global show-text setting — they're spatial controls, the icon is enough.
+  QToolButton* sidebarBtn = new QToolButton(this);
+  sidebarBtn->setObjectName("toolBtn");
+  sidebarBtn->setIcon(QIcon(":/assets/images/icons/sidebar.svg"));
+  sidebarBtn->setIconSize(QSize(16, 16));
+  sidebarBtn->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  sidebarBtn->setCheckable(true);
+  sidebarBtn->setChecked(true);
+  sidebarBtn->setCursor(Qt::PointingHandCursor);
+  sidebarBtn->setToolTip(tr("Toggle sidebar"));
+  connect(sidebarBtn, &QToolButton::toggled, this, [this](bool on) {
+    if (sidebarPane_) {
+      sidebarPane_->setVisible(on);
+    }
+  });
+  lay->addWidget(sidebarBtn);
+
+  QToolButton* panelBtn = new QToolButton(this);
+  panelBtn->setObjectName("toolBtn");
+  panelBtn->setIcon(QIcon(":/assets/images/icons/panel.svg"));
+  panelBtn->setIconSize(QSize(16, 16));
+  panelBtn->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  panelBtn->setCheckable(true);
+  panelBtn->setChecked(true);
+  panelBtn->setCursor(Qt::PointingHandCursor);
+  panelBtn->setToolTip(tr("Toggle output panel"));
+  connect(panelBtn, &QToolButton::toggled, this, [this](bool on) {
+    ui_->output->setVisible(on);
+  });
+  lay->addWidget(panelBtn);
+
+  QToolBar* mainBar = addToolBar(tr("Main"));
+  mainBar->setObjectName("mainToolBar");
+  mainBar->setMovable(false);
+  mainBar->setFloatable(false);
+  mainBar->setStyleSheet("QToolBar#mainToolBar { border: none; padding: 0; spacing: 0; }");
+  mainBar->addWidget(topToolbar_);
+
+  // Reposition "+" whenever tabs change.
+  connect(ui_->tabWidget, &QTabWidget::currentChanged, this, [this](int){ repositionAddTabBtn(); });
+  connect(ui_->tabWidget->tabBar(), &QTabBar::tabMoved, this, [this](int,int){ repositionAddTabBtn(); });
+
+  applyToolbarStyle();
+}
+
+void MainWindow::repositionAddTabBtn() {
+  if (!addTabBtn_) return;
+  QTabBar* tb = ui_->tabWidget->tabBar();
+  const int count = tb->count();
+  const int btnW = 26, btnH = 22;
+  int x = 4;
+  int y = qMax(0, (tb->height() - btnH) / 2);
+  if (count > 0) {
+    QRect last = tb->tabRect(count - 1);
+    x = last.right() + 6;
+    y = last.top() + qMax(0, (last.height() - btnH) / 2);
+  }
+  addTabBtn_->setGeometry(x, y, btnW, btnH);
+  addTabBtn_->raise();
+}
+
+void MainWindow::applyToolbarStyle() {
+  // Setting: "ShowToolbarText" (default true). The toolbar also collapses to
+  // icons when the window is too narrow to fit all labels — even with the
+  // user preference on. ~1100px is roughly the width at which the labels
+  // start crowding the right corner / overflowing.
+  const bool prefersText = QSettings().value("ShowToolbarText", true).toBool();
+  const bool fitsText = width() >= 1100;
+  const auto style = (prefersText && fitsText) ? Qt::ToolButtonTextBesideIcon
+                                                : Qt::ToolButtonIconOnly;
+  for (QToolButton* b : toolbarButtons_) {
+    if (!b) continue;
+    if (b->property("keepLabel").toBool()) {
+      b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    } else {
+      b->setToolButtonStyle(style);
+    }
+  }
+}
+
+bool MainWindow::effectiveDarkMode() const {
+  if (themeMode_ == 1) {
+    return false;
+  }
+  if (themeMode_ == 2) {
+    return true;
+  }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+  return QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+#else
+  return kDefaultDarkMode;
+#endif
+}
+
+void MainWindow::setThemeMode(int mode) {
+  themeMode_ = mode;
+  QSettings settings;
+  settings.setValue("ThemeMode", mode);
+  applyTheme();
+}
+
+void MainWindow::applyThemedActionIcons(bool dark) {
+  // Centralised re-tint for every QAction icon shipped with the app — runs
+  // on every theme switch so dark icons swap to light tints (and vice versa)
+  // without leaving stale colours behind.
+  struct Entry { QAction* action; const char* path; int size; };
+  const Entry entries[] = {
+    { ui_->actionNewGM,      ":/assets/images/icons/new.svg",                 16 },
+    { ui_->actionNewFS,      ":/assets/images/icons/new.svg",                 16 },
+    { ui_->actionNewInc,     ":/assets/images/icons/new.svg",                 16 },
+    { ui_->actionNewBlank,   ":/assets/images/icons/new.svg",                 16 },
+    { ui_->actionOpen,       ":/assets/images/icons/open.svg",                16 },
+    { ui_->actionSave,       ":/assets/images/icons/save.svg",                16 },
+    { ui_->actionSaveAs,     ":/assets/images/icons/save.svg",                16 },
+    { ui_->actionSaveAll,    ":/assets/images/icons/save.svg",                16 },
+    { ui_->actionCompile,    ":/assets/images/icons/run.svg",                 16 },
+    { ui_->actionCompileRun, ":/assets/images/icons/run.svg",                 16 },
+    { ui_->actionRun,        ":/assets/images/icons/run.svg",                 16 },
+    { ui_->actionClose,      ":/assets/images/icons/close.svg",               16 },
+    { ui_->actionQuit,       ":/assets/images/icons/quit.svg",                16 },
+    { ui_->actionUndo,       ":/assets/images/icons/undo.svg",                16 },
+    { ui_->actionRedo,       ":/assets/images/icons/redo.svg",                16 },
+    { ui_->actionCut,        ":/assets/images/icons/cut.svg",                 16 },
+    { ui_->actionCopy,       ":/assets/images/icons/copy.svg",                16 },
+    { ui_->actionPaste,      ":/assets/images/icons/paste.svg",               16 },
+    { ui_->actionFind,       ":/assets/images/icons/find.svg",                16 },
+    { ui_->actionFindNext,   ":/assets/images/icons/find-next.svg",           16 },
+    { ui_->actionGoToLine,   ":/assets/images/icons/goto-line.svg",           16 },
+    { ui_->actionDupsel,     ":/assets/images/icons/duplicate-selection.svg", 16 },
+    { ui_->actionDupline,    ":/assets/images/icons/duplicate-line.svg",      16 },
+    { ui_->actionDelline,    ":/assets/images/icons/delete-line.svg",         16 },
+    { ui_->actionComment,    ":/assets/images/icons/comment.svg",             16 },
+    { ui_->actionColours,    ":/assets/images/icons/color-picker.svg",        16 },
+  };
+  for (const Entry& e : entries) {
+    if (e.action) e.action->setIcon(IconLoader::themed(e.path, dark, QSize(e.size, e.size)));
+  }
+  // Themed icons on the File/Edit menu buttons (objectName "menuBtn").
+  const QList<QPair<const char*, const char*>> menuBtnIcons = {
+    {"File", ":/assets/images/icons/file-menu.svg"},
+    {"Edit", ":/assets/images/icons/edit.svg"},
+  };
+  for (QToolButton* b : toolbarButtons_) {
+    if (!b || b->objectName() != "menuBtn") continue;
+    for (const auto& mi : menuBtnIcons) {
+      if (b->text() == QString::fromLatin1(mi.first)) {
+        b->setIcon(IconLoader::themed(mi.second, dark, QSize(16, 16)));
+        break;
+      }
+    }
+  }
+}
+
+void MainWindow::applyTheme() {
+  bool dark = effectiveDarkMode();
+  applyThemedActionIcons(dark);
+  ui_->outerWidget->setPalette(dark ? darkModePalette : defaultPalette);
+  for (auto i : editors_) {
+    i->toggleDarkMode(dark);
+  }
+  ui_->actionDarkMode->setChecked(dark);
+  updateThemeButton();
+  if (findDialog_) {
+    findDialog_->applyTheme(dark);
+  }
+  if (settingsDialog_) {
+    settingsDialog_->applyTheme(dark);
+  }
+
+  // Window-level theming for the cornerBtn text/icons and sidebar header.
+  const char* barText  = dark ? "#C8CDD6" : "#1A1E25";
+  const char* sepCol   = dark ? "#3A3F4B" : "#A8B0BC";
+  const char* btnBorder= dark ? "rgba(160,170,190,0.45)" : "rgba(60,68,80,0.55)";
+  const char* btnHover = dark ? "rgba(127,140,160,0.18)" : "rgba(0,0,0,0.10)";
+  const char* winBg    = dark ? "#21262D" : "#D8DEE5";
+  setStyleSheet(QString(R"(
+    QMainWindow { background: %5; }
+    QWidget#topToolbar { background: %5; }
+    QToolButton#toolBtn {
+      border: 1px solid %3; border-radius: 6px; padding: 4px 10px; font-size: 12px; color: %1;
+      min-height: 22px;
+    }
+    QToolButton#toolBtn:hover   { background: %4; border: 1px solid %3; }
+    QToolButton#toolBtn:pressed { background: %4; border: 1px solid %3; }
+    QToolButton#toolBtn:checked { background: %4; border: 1px solid %3; }
+    QToolButton#toolBtn::menu-button { border: none; width: 0; }
+    QToolButton#toolBtn::menu-arrow { image: none; width: 0; height: 0; }
+    QToolButton#toolBtn::menu-indicator { image: none; width: 0; height: 0; }
+    /* File / Edit drop-down buttons keep the same chrome but show a chevron
+       so users know they open a menu. */
+    QToolButton#menuBtn {
+      border: 1px solid %3; border-radius: 6px; padding: 4px 8px 4px 10px;
+      font-size: 12px; color: %1; min-height: 22px;
+    }
+    QToolButton#menuBtn:hover, QToolButton#menuBtn:pressed { background: %4; border: 1px solid %3; }
+    QToolButton#menuBtn::menu-button { border: none; width: 12px; }
+    QToolButton#menuBtn::menu-arrow {
+      image: url(:/assets/images/icons/chevron-down.svg);
+      width: 10px; height: 10px; margin-right: 4px;
+    }
+    QToolButton#menuBtn::menu-indicator { image: none; width: 0; height: 0; }
+    QFrame#cornerSep { color: %2; max-width: 1px; margin: 6px 3px; }
+    QLabel#tabsLabel { color: %1; font-weight: bold; font-size: 11px; letter-spacing: 1px; padding: 0; }
+    QTabBar QToolButton { border: none; background: transparent; }
+    QTabBar::scroller { width: 28px; }
+    QTabBar::close-button {
+      subcontrol-position: right; subcontrol-origin: padding;
+      margin: 0 4px 0 10px;
+      image: url(:/assets/images/icons/tab-close.svg);
+      width: 18px; height: 18px;
+      padding: 2px;
+    }
+    QTabBar::close-button:hover {
+      image: url(:/assets/images/icons/tab-close-hover.svg);
+      background: rgba(127,140,160,0.25); border-radius: 4px;
+    }
+    QWidget#sidebarBox { border-radius: 0; }
+    QListWidget#functions { border: none; padding: 4px; }
+    QLabel#sidebarHeader {
+      font-weight: bold; letter-spacing: 1px; font-size: 11px; padding: 4px;
+    }
+  )").arg(barText, sepCol, btnBorder, btnHover, winBg));
+
+  // VS Code-style tab strip: tabs sit flush against the editor pane (square
+  // bottom, no gap), the active tab's background matches the pane so they
+  // visually merge. Text is vertically centred.
+  if (dark) {
+    ui_->outerWidget->setStyleSheet(R"(
+      QToolButton#cornerBtn { color: #C8CDD6; }
+      QTabWidget::pane { border: 1px solid #3A3F4B; border-top: none; background: #1B1F25; top: 0; }
+      QMainWindow { background: #21262D; }
+      QWidget#outerWidget { background: #21262D; }
+      QTabBar { qproperty-drawBase: 0; background: #21262D; }
+      QTabBar::tab {
+        background: #21262D; color: #8B93A2;
+        padding: 6px 10px 6px 14px; margin: 0; min-width: 80px; min-height: 24px;
+        border: none; border-right: 1px solid #3A3F4B;
+      }
+      QTabBar::tab:selected { background: #1B1F25; color: #FFFFFF; border-bottom: 2px solid #5B9BD5; }
+      QTabBar::tab:hover:!selected { background: #2D333D; }
+      QTabBar::close-button {
+        subcontrol-position: right; subcontrol-origin: padding;
+        margin: 0 4px 0 10px;
+        image: url(:/assets/images/icons/tab-close.svg);
+        width: 18px; height: 18px;
+        padding: 2px;
+      }
+      QTabBar::close-button:hover {
+        image: url(:/assets/images/icons/tab-close-hover.svg);
+        background: rgba(127,140,160,0.25); border-radius: 4px;
+      }
+      QWidget#topToolbar { background: #21262D; }
+      QToolButton#addTabBtn {
+        color: #C8CDD6; background: transparent;
+        border: 1px solid rgba(160,170,190,0.45); border-radius: 6px;
+        padding: 0; font-size: 16px; font-weight: bold;
+      }
+      QToolButton#addTabBtn:hover { background: rgba(127,140,160,0.22); }
+      QWidget#sidebarBox {
+        border: 1px solid #3A3F4B; background: #1B1F25;
+        border-top-left-radius: 8px; border-top-right-radius: 8px;
+      }
+      QListWidget#functions {
+        border: none; border-top: 1px solid #3A3F4B; background: #1B1F25; color: #C8CDD6;
+        border-bottom-left-radius: 8px; border-bottom-right-radius: 8px;
+      }
+      QLabel#sidebarHeader {
+        color: #9DA5B4; background: #2D333D; border-bottom: 1px solid #3A3F4B;
+        border-top-left-radius: 8px; border-top-right-radius: 8px;
+      }
+      QWidget#sidebarTopSpacer { background: #21262D; border-bottom: 1px solid #3A3F4B; }
+      OutputWidget#output {
+        border: 1px solid #3A3F4B; background: #1B1F25; color: #C8CDD6;
+        border-top-left-radius: 8px; border-top-right-radius: 8px;
+      }
+      QWidget#welcomePage { background: #282C34; }
+      QWidget#inlineFindBar { background: #21262D; border-bottom: 1px solid #3A3F4B; }
+      QWidget#inlineFindBar QLineEdit { background: #1B1F25; border: 1px solid #3A3F4B; border-radius: 4px; padding: 4px 8px; color: #C8CDD6; font-size: 13px; min-height: 22px; }
+      QWidget#inlineFindBar QToolButton#inlineFindBtn,
+      QWidget#inlineFindBar QToolButton#inlineFindOpt {
+        color: #C8CDD6; background: #2D333D; border: 1px solid #3A3F4B; border-radius: 5px;
+        padding: 4px 8px; min-width: 28px; min-height: 22px; font-size: 13px;
+      }
+      QWidget#inlineFindBar QToolButton#inlineFindBtn:hover,
+      QWidget#inlineFindBar QToolButton#inlineFindOpt:hover { background: rgba(127,140,160,0.22); }
+      QWidget#inlineFindBar QToolButton#inlineFindOpt:checked { background: #324054; border-color: #5B9BD5; color: #FFFFFF; }
+      QWidget#inlineFindBar QToolButton#inlineFindExpand {
+        color: #C8CDD6; background: #2D333D; border: 1px solid #3A3F4B;
+        border-radius: 6px; font-size: 18px; font-weight: bold; padding: 0;
+      }
+      QWidget#inlineFindBar QToolButton#inlineFindExpand:hover { background: rgba(127,140,160,0.22); }
+      QLabel#inlineFindStatus { color: #9AA0AB; font-size: 12px; padding: 0 8px; }
+      QPushButton#recentItem, QLabel#recentItem { border: none; text-align: left; color: #C8CDD6; font-size: 14px; padding: 2px 0; }
+      QPushButton#recentItem:hover, QLabel#recentItem:hover { color: #5B9BD5; }
+      QPushButton#welcomeTile { text-align: left; padding: 8px 12px; border: 1px solid #3A3F4B; border-radius: 10px; font-size: 14px; color: #C8CDD6; }
+      QPushButton#welcomeTile:hover { background: rgba(127,140,160,0.14); }
+      QPushButton#welcomeLink { border: none; color: #5B9BD5; text-align: left; font-size: 14px; }
+      QPushButton#welcomeLink:hover { text-decoration: underline; }
+      QLabel#welcomeName { color: #FFFFFF; }
+      QLabel#recentHeader { color: #9DA5B4; }
+      QLabel#startHeader  { color: #9DA5B4; }
+      QFrame#toolingCard { border: 1px solid #3A3F4B; border-radius: 8px; background: #21262D; }
+      QLabel#toolingTitle { color: #FFFFFF; font-size: 16px; font-weight: 600; }
+      QLabel#toolingDetail { color: #9AA1AD; font-size: 12px; }
+    )");
+  } else {
+    ui_->outerWidget->setStyleSheet(R"(
+      QToolButton#cornerBtn { color: #3A4252; }
+      QTabWidget::pane { border: 1px solid #C8CDD6; border-top: none; background: #FBFCFD; top: 0; }
+      QMainWindow { background: #D8DEE5; }
+      QWidget#outerWidget { background: #D8DEE5; }
+      QTabBar { qproperty-drawBase: 0; background: #D8DEE5; }
+      QTabBar::tab {
+        background: #D8DEE5; color: #2A3340;
+        padding: 6px 10px 6px 14px; margin: 0; min-width: 80px; min-height: 24px;
+        border: none; border-right: 1px solid #B6BDC7;
+      }
+      QTabBar::tab:selected { background: #FBFCFD; color: #1A1E25; border-bottom: 2px solid #1E6BB8; }
+      QTabBar::tab:hover:!selected { background: #C5CCD6; color: #1A1E25; }
+      QTabBar::close-button {
+        subcontrol-position: right; subcontrol-origin: padding;
+        margin: 0 4px 0 10px;
+        image: url(:/assets/images/icons/tab-close.svg);
+        width: 18px; height: 18px;
+        padding: 2px;
+      }
+      QTabBar::close-button:hover {
+        image: url(:/assets/images/icons/tab-close-hover.svg);
+        background: rgba(0,0,0,0.10); border-radius: 4px;
+      }
+      QWidget#topToolbar { background: #D8DEE5; }
+      QToolButton#addTabBtn {
+        color: #1A1E25; background: transparent;
+        border: 1px solid rgba(60,68,80,0.55); border-radius: 6px;
+        padding: 0; font-size: 16px; font-weight: bold;
+      }
+      QToolButton#addTabBtn:hover { background: rgba(0,0,0,0.10); }
+      QWidget#sidebarBox {
+        border: 1px solid #C8CDD6; background: #FBFCFD;
+        border-top-left-radius: 8px; border-top-right-radius: 8px;
+      }
+      QListWidget#functions {
+        border: none; border-top: 1px solid #C8CDD6; background: #FBFCFD; color: #3A4252;
+        border-bottom-left-radius: 8px; border-bottom-right-radius: 8px;
+      }
+      QLabel#sidebarHeader {
+        color: #2A3340; background: #E0E4EA; border-bottom: 1px solid #C8CDD6;
+        border-top-left-radius: 8px; border-top-right-radius: 8px;
+      }
+      QWidget#sidebarTopSpacer { background: #D8DEE5; border-bottom: 1px solid #B6BDC7; }
+      OutputWidget#output {
+        border: 1px solid #C8CDD6; background: #FBFCFD; color: #1A1E25;
+        border-top-left-radius: 8px; border-top-right-radius: 8px;
+      }
+      QWidget#welcomePage { background: #F4F6F8; }
+      QWidget#inlineFindBar { background: #E8ECF0; border-bottom: 1px solid #C8CDD6; }
+      QWidget#inlineFindBar QLineEdit { background: #FFFFFF; border: 1px solid #C8CDD6; border-radius: 4px; padding: 4px 8px; color: #1A1E25; font-size: 13px; min-height: 22px; }
+      QWidget#inlineFindBar QToolButton#inlineFindBtn,
+      QWidget#inlineFindBar QToolButton#inlineFindOpt {
+        color: #3A4252; background: #FFFFFF; border: 1px solid #C8CDD6; border-radius: 5px;
+        padding: 4px 8px; min-width: 28px; min-height: 22px; font-size: 13px;
+      }
+      QWidget#inlineFindBar QToolButton#inlineFindBtn:hover,
+      QWidget#inlineFindBar QToolButton#inlineFindOpt:hover { background: rgba(0,0,0,0.05); }
+      QWidget#inlineFindBar QToolButton#inlineFindOpt:checked { background: #CCE0F5; border-color: #1E6BB8; color: #1A1E25; }
+      QWidget#inlineFindBar QToolButton#inlineFindExpand {
+        color: #1A1E25; background: #FFFFFF; border: 1px solid #C8CDD6;
+        border-radius: 6px; font-size: 18px; font-weight: bold; padding: 0;
+      }
+      QWidget#inlineFindBar QToolButton#inlineFindExpand:hover { background: rgba(0,0,0,0.06); }
+      QLabel#inlineFindStatus { color: #5A6270; font-size: 12px; padding: 0 8px; }
+      QPushButton#recentItem, QLabel#recentItem { border: none; text-align: left; color: #1A1E25; font-size: 14px; padding: 2px 0; }
+      QPushButton#recentItem:hover, QLabel#recentItem:hover { color: #1E6BB8; }
+      QPushButton#welcomeTile { text-align: left; padding: 8px 12px; border: 1px solid #C8CDD6; border-radius: 10px; font-size: 14px; color: #3A4252; }
+      QPushButton#welcomeTile:hover { background: rgba(0,0,0,0.05); }
+      QPushButton#welcomeLink { border: none; color: #1E6BB8; text-align: left; font-size: 14px; }
+      QPushButton#welcomeLink:hover { text-decoration: underline; }
+      QLabel#welcomeName { color: #1A1E25; }
+      QLabel#recentHeader { color: #1A1E25; font-weight: 600; }
+      QLabel#startHeader  { color: #1A1E25; font-weight: 600; }
+      QFrame#toolingCard { border: 1px solid #C8CDD6; border-radius: 8px; background: #FFFFFF; }
+      QLabel#toolingTitle { color: #1A1E25; font-size: 16px; font-weight: 600; }
+      QLabel#toolingDetail { color: #5A6270; font-size: 12px; }
+    )");
+  }
+  repositionAddTabBtn();
+}
+
+void MainWindow::clearDiagnostics() {
+  // Reset every editor's extraSelections — wipes any wavy-underline markers
+  // left over from a previous compile.
+  for (EditorWidget* e : editors_) {
+    if (e) e->setExtraSelections({});
+  }
+}
+
+void MainWindow::applyDiagnostic(const QString& filePath, int line, bool isError) {
+  // Find the open tab matching this path (compare by basename to be tolerant
+  // of the path-shortening rewrites).
+  EditorWidget* target = nullptr;
+  const QString base = QFileInfo(filePath).fileName();
+  for (int i = 0; i < fileNames_.size(); ++i) {
+    if (fileNames_[i].isEmpty()) continue;
+    if (fileNames_[i] == filePath ||
+        QFileInfo(fileNames_[i]).fileName() == base) {
+      target = (i < editors_.size()) ? editors_[i] : nullptr;
+      if (target) break;
+    }
+  }
+  if (!target || line <= 0) return;
+  QTextBlock block = target->document()->findBlockByLineNumber(line - 1);
+  if (!block.isValid()) return;
+  QTextEdit::ExtraSelection sel;
+  sel.cursor = QTextCursor(block);
+  sel.cursor.select(QTextCursor::LineUnderCursor);
+  QTextCharFormat fmt;
+  fmt.setUnderlineStyle(QTextCharFormat::WaveUnderline);
+  fmt.setUnderlineColor(isError ? QColor(0xE5, 0x48, 0x4A) : QColor(0xE0, 0xA8, 0x3C));
+  sel.format = fmt;
+  auto existing = target->extraSelections();
+  existing.append(sel);
+  target->setExtraSelections(existing);
+}
+
+QString MainWindow::stripUserPrefix(const QString& path) const {
+  // macOS / Linux native paths.
+  const QString home = QDir::homePath();
+  if (!home.isEmpty() && path.startsWith(home)) {
+    return path.mid(home.length());
+  }
+  // Wine-mapped equivalent (Z:\Users\<user>\…). Built from the home dir so we
+  // strip the same prefix regardless of who's logged in.
+  QString wineHome = "Z:" + home;
+  wineHome.replace('/', '\\');
+  if (!wineHome.isEmpty() && path.startsWith(wineHome, Qt::CaseInsensitive)) {
+    return path.mid(wineHome.length());
+  }
+  return path;
+}
+
+QString MainWindow::shortenPath(const QString& path) const {
+  if (SettingsDialog::fullPathInOutput()) {
+    return stripUserPrefix(path);
+  }
+  // Just the filename — "Z:\…\zombie.pwn" → "zombie.pwn".
+  QString p = path;
+  p.replace('\\', '/');
+  int slash = p.lastIndexOf('/');
+  return slash < 0 ? path : p.mid(slash + 1);
+}
+
+void MainWindow::updateThemeButton() {
+  if (!themeButton_) return;
+  const char* icon = themeMode_ == 1 ? ":/assets/images/icons/theme-light.svg"
+                   : themeMode_ == 2 ? ":/assets/images/icons/theme-dark.svg"
+                                     : ":/assets/images/icons/theme-system.svg";
+  const QString name = themeMode_ == 1 ? tr("Light")
+                     : themeMode_ == 2 ? tr("Dark")
+                                       : tr("System");
+  themeButton_->setIcon(QIcon(icon));
+  themeButton_->setText(name);
+  if (themeSystemAct_) themeSystemAct_->setChecked(themeMode_ == 0);
+  if (themeLightAct_)  themeLightAct_->setChecked(themeMode_ == 1);
+  if (themeDarkAct_)   themeDarkAct_->setChecked(themeMode_ == 2);
+}
+
+void MainWindow::on_actionSettings_triggered() {
+  // Lazy-create a persistent SettingsDialog (frameless, in-window). Same
+  // pattern as FindDialog — single instance lives across open/close cycles.
+  if (!settingsDialog_) {
+    settingsDialog_ = new SettingsDialog(this);
+    connect(settingsDialog_, &SettingsDialog::applied, this, [this] {
+      setThemeMode(SettingsDialog::uiThemeMode());
+      QFont ef = settingsDialog_->editorFont();
+      for (auto e : editors_) {
+        e->setFont(ef);
+      }
+      ui_->output->setFont(settingsDialog_->outputFont());
+      applyToolbarStyle();
+      settingsDialog_->applyTheme(effectiveDarkMode());
+    });
+    connect(settingsDialog_, &SettingsDialog::updateRequested, this, &MainWindow::promptForUpdate);
+  }
+  if (auto e = getCurrentEditor()) {
+    settingsDialog_->setEditorFont(e->font());
+  } else {
+    settingsDialog_->setEditorFont(font());
+  }
+  settingsDialog_->setOutputFont(ui_->output->font());
+  settingsDialog_->applyTheme(effectiveDarkMode());
+  settingsDialog_->show();
+  settingsDialog_->raise();
+  settingsDialog_->activateWindow();
+}
+
+void MainWindow::ensureInlineFindBar() {
+  if (inlineFindBar_) return;
+  // VS Code-style two-row find/replace bar that pushes the editor content
+  // down (no overlay) — lives in the central widget's verticalLayout above
+  // the splitter so it always reserves its own vertical space.
+  inlineFindBar_ = new QWidget(this);
+  inlineFindBar_->setObjectName("inlineFindBar");
+  inlineFindBar_->setAutoFillBackground(true);
+  // Horizontal split: expand chevron column + stacked rows column. Keeping
+  // the chevron in its own column lets it sit centered between Find and
+  // Replace rows when expanded, with a proper button boundary.
+  auto outer = new QHBoxLayout(inlineFindBar_);
+  outer->setContentsMargins(8, 4, 6, 4);
+  outer->setSpacing(6);
+
+  // Expand-replace chevron (▸ collapsed, ▾ expanded). Bordered button,
+  // vertically centered against the whole bar so it tracks both rows.
+  auto expandBtn = new QToolButton;
+  expandBtn->setObjectName("inlineFindExpand");
+  expandBtn->setText(QStringLiteral("▸"));
+  expandBtn->setCheckable(true);
+  expandBtn->setToolTip(tr("Toggle replace"));
+  expandBtn->setCursor(Qt::PointingHandCursor);
+  expandBtn->setFixedSize(28, 28);
+  outer->addWidget(expandBtn, 0, Qt::AlignVCenter);
+
+  auto v = new QVBoxLayout;
+  v->setContentsMargins(0, 0, 0, 0);
+  v->setSpacing(4);
+  outer->addLayout(v, 1);
+
+  // ---- Find row ----
+  auto findRow = new QHBoxLayout;
+  findRow->setSpacing(4);
+
+  inlineFindEdit_ = new QLineEdit;
+  inlineFindEdit_->setPlaceholderText(tr("Find"));
+  inlineFindEdit_->setClearButtonEnabled(true);
+  inlineFindEdit_->setMinimumWidth(280);
+  findRow->addWidget(inlineFindEdit_, 1);
+
+  inlineMatchCase_ = new QToolButton;
+  inlineMatchCase_->setText(QStringLiteral("Aa"));
+  inlineMatchCase_->setCheckable(true);
+  inlineMatchCase_->setToolTip(tr("Match case"));
+  inlineWholeWord_ = new QToolButton;
+  inlineWholeWord_->setText(QStringLiteral("ab"));
+  inlineWholeWord_->setCheckable(true);
+  inlineWholeWord_->setToolTip(tr("Match whole word"));
+  inlineRegex_ = new QToolButton;
+  inlineRegex_->setText(QStringLiteral(".*"));
+  inlineRegex_->setCheckable(true);
+  inlineRegex_->setToolTip(tr("Regular expression"));
+  for (auto b : { inlineMatchCase_, inlineWholeWord_, inlineRegex_ }) {
+    b->setObjectName("inlineFindOpt");
+    b->setCursor(Qt::PointingHandCursor);
+    findRow->addWidget(b);
+  }
+
+  auto prev = new QToolButton; prev->setText(QStringLiteral("↑")); prev->setToolTip(tr("Previous"));
+  auto next = new QToolButton; next->setText(QStringLiteral("↓")); next->setToolTip(tr("Next"));
+  auto close = new QToolButton; close->setText(QStringLiteral("×")); close->setToolTip(tr("Close"));
+  for (auto b : { prev, next, close }) {
+    b->setObjectName("inlineFindBtn");
+    b->setCursor(Qt::PointingHandCursor);
+  }
+  inlineFindStatus_ = new QLabel(tr("No results"));
+  inlineFindStatus_->setObjectName("inlineFindStatus");
+  findRow->addWidget(inlineFindStatus_);
+  findRow->addWidget(prev);
+  findRow->addWidget(next);
+  findRow->addWidget(close);
+  v->addLayout(findRow);
+
+  // ---- Replace row (hidden until expanded) ----
+  inlineReplaceRow_ = new QWidget;
+  auto replaceLay = new QHBoxLayout(inlineReplaceRow_);
+  replaceLay->setContentsMargins(0, 0, 0, 0);
+  replaceLay->setSpacing(4);
+  inlineReplaceEdit_ = new QLineEdit;
+  inlineReplaceEdit_->setPlaceholderText(tr("Replace"));
+  inlineReplaceEdit_->setClearButtonEnabled(true);
+  inlineReplaceEdit_->setMinimumWidth(280);
+  replaceLay->addWidget(inlineReplaceEdit_, 1);
+  auto repOne = new QToolButton; repOne->setText(tr("Replace"));
+  auto repAll = new QToolButton; repAll->setText(tr("All"));
+  for (auto b : { repOne, repAll }) {
+    b->setObjectName("inlineFindBtn");
+    b->setCursor(Qt::PointingHandCursor);
+    replaceLay->addWidget(b);
+  }
+  inlineReplaceRow_->hide();
+  v->addWidget(inlineReplaceRow_);
+
+  connect(expandBtn, &QToolButton::toggled, this, [this, expandBtn](bool on) {
+    inlineReplaceRow_->setVisible(on);
+    expandBtn->setText(on ? QStringLiteral("▾") : QStringLiteral("▸"));
+  });
+
+  connect(inlineFindEdit_, &QLineEdit::returnPressed, this, [this] { runInlineFind(false); });
+  connect(next, &QToolButton::clicked, this, [this] { runInlineFind(false); });
+  connect(prev, &QToolButton::clicked, this, [this] { runInlineFind(true); });
+  connect(close, &QToolButton::clicked, this, [this] { inlineFindBar_->hide(); });
+  connect(repOne, &QToolButton::clicked, this, [this] { runInlineReplaceOne(); });
+  connect(repAll, &QToolButton::clicked, this, [this] { runInlineReplaceAll(); });
+
+  // Insert at the top of the central widget's vertical stack so the bar
+  // reserves layout space (editor content shifts down — no overlay).
+  ui_->verticalLayout->insertWidget(0, inlineFindBar_);
+  inlineFindBar_->hide();
+}
+
+void MainWindow::toggleInlineFindBar() {
+  ensureInlineFindBar();
+  if (inlineFindBar_->isVisible()) {
+    inlineFindBar_->hide();
+    if (auto e = getCurrentEditor()) e->setFocus();
+  } else {
+    inlineFindBar_->show();
+    inlineFindEdit_->setFocus();
+    inlineFindEdit_->selectAll();
+    if (inlineFindStatus_) inlineFindStatus_->clear();
+  }
+}
+
+void MainWindow::runInlineFind(bool backward) {
+  auto e = getCurrentEditor();
+  if (!e || !inlineFindEdit_) return;
+  const QString needle = inlineFindEdit_->text();
+  if (needle.isEmpty()) return;
+  QTextDocument::FindFlags flags;
+  if (backward) flags |= QTextDocument::FindBackward;
+  if (inlineMatchCase_->isChecked()) flags |= QTextDocument::FindCaseSensitively;
+  if (inlineWholeWord_->isChecked()) flags |= QTextDocument::FindWholeWords;
+
+  auto findOne = [this, e, needle, &flags](QTextCursor from) {
+    if (inlineRegex_->isChecked()) {
+      auto sens = inlineMatchCase_->isChecked()
+                      ? QRegularExpression::NoPatternOption
+                      : QRegularExpression::CaseInsensitiveOption;
+      return e->document()->find(QRegularExpression(needle, sens), from, flags);
+    }
+    return e->document()->find(needle, from, flags);
+  };
+
+  QTextCursor cur = e->textCursor();
+  QTextCursor hit = findOne(cur);
+  if (hit.isNull()) {
+    QTextCursor wrap(e->document());
+    if (backward) wrap.movePosition(QTextCursor::End);
+    hit = findOne(wrap);
+  }
+  if (hit.isNull()) {
+    inlineFindStatus_->setText(tr("No results"));
+  } else {
+    e->setTextCursor(hit);
+    inlineFindStatus_->setText(QString());
+  }
+}
+
+void MainWindow::runInlineReplaceOne() {
+  auto e = getCurrentEditor();
+  if (!e || !inlineFindEdit_ || !inlineReplaceEdit_) return;
+  QTextCursor cur = e->textCursor();
+  const QString needle = inlineFindEdit_->text();
+  // Replace current selection if it matches the search term, then advance.
+  if (cur.hasSelection() && cur.selectedText() == needle) {
+    cur.insertText(inlineReplaceEdit_->text());
+  }
+  runInlineFind(false);
+}
+
+void MainWindow::runInlineReplaceAll() {
+  auto e = getCurrentEditor();
+  if (!e || !inlineFindEdit_ || !inlineReplaceEdit_) return;
+  const QString needle = inlineFindEdit_->text();
+  const QString replacement = inlineReplaceEdit_->text();
+  if (needle.isEmpty()) return;
+  QTextDocument::FindFlags flags;
+  if (inlineMatchCase_->isChecked()) flags |= QTextDocument::FindCaseSensitively;
+  if (inlineWholeWord_->isChecked()) flags |= QTextDocument::FindWholeWords;
+
+  QTextCursor sweep(e->document());
+  sweep.movePosition(QTextCursor::Start);
+  int count = 0;
+  bool inBlock = false;
+  while (true) {
+    QTextCursor hit;
+    if (inlineRegex_->isChecked()) {
+      auto sens = inlineMatchCase_->isChecked()
+                      ? QRegularExpression::NoPatternOption
+                      : QRegularExpression::CaseInsensitiveOption;
+      hit = e->document()->find(QRegularExpression(needle, sens), sweep, flags);
+    } else {
+      hit = e->document()->find(needle, sweep, flags);
+    }
+    if (hit.isNull()) break;
+    if (!inBlock) { hit.beginEditBlock(); inBlock = true; }
+    else { hit.joinPreviousEditBlock(); }
+    hit.insertText(replacement);
+    hit.endEditBlock();
+    sweep = hit;
+    ++count;
+  }
+  inlineFindStatus_->setText(count == 0
+                                  ? tr("No results")
+                                  : tr("%1 replaced").arg(count));
+}
+
+void MainWindow::updateWelcomeVisibility() {
+  if (!welcomeWidget_) {
+    return;
+  }
+  bool empty = editors_.isEmpty();
+  ui_->divider->setVisible(!empty);
+  welcomeWidget_->setVisible(empty);
+  // Hide the action toolbar on the welcome screen — those buttons act on an
+  // open editor, so they're not meaningful before any file is loaded.
+  if (topToolbar_) {
+    if (QWidget* tb = topToolbar_->parentWidget()) {
+      tb->setVisible(!empty);
+    }
+  }
+  if (empty) {
+    refreshRecents();
+#ifdef Q_OS_MACOS
+    refreshCrossOverCard();
+    refreshQawnoFilesCard();
+#endif
+  } else {
+    repositionAddTabBtn();
+  }
+  updateFileInfo();
+}
+
+void MainWindow::addRecentFile(const QString& path) {
+  if (path.isEmpty() || !isPawnFile(path)) {
+    return;
+  }
+  QSettings settings;
+  QStringList recents = settings.value("RecentFiles").toStringList();
+  // Purge any stale non-pawn entries that may have been recorded before the
+  // extension filter was added.
+  recents.erase(std::remove_if(recents.begin(), recents.end(),
+                                 [](const QString& p) { return !isPawnFile(p); }),
+                  recents.end());
+  recents.removeAll(path);
+  recents.prepend(path);
+  while (recents.size() > 15) {
+    recents.removeLast();
+  }
+  settings.setValue("RecentFiles", recents);
+}
+
+void MainWindow::refreshRecents() {
+  if (!recentsLayout_) {
+    return;
+  }
+  QLayoutItem* item;
+  while ((item = recentsLayout_->takeAt(0)) != nullptr) {
+    if (item->widget()) {
+      item->widget()->deleteLater();
+    }
+    delete item;
+  }
+  QSettings settings;
+  QStringList recents = settings.value("RecentFiles").toStringList();
+  if (recents.isEmpty()) {
+    QLabel* none = new QLabel(tr("No recent files"));
+    none->setStyleSheet("color:#6B7280; font-size:13px;");
+    recentsLayout_->addWidget(none);
+    return;
+  }
+  int shown = 0;
+  for (const QString& path : recents) {
+    if (shown >= 5) {
+      break;
+    }
+    QFileInfo fi(path);
+    // QLabel supports rich text, so filename can be normal and the path dimmed.
+    // Wrap it in a clickable button-like label.
+    const QString dim = effectiveDarkMode() ? "#6B7280" : "#9AA1AC";
+    QLabel* b = new QLabel;
+    b->setObjectName("recentItem");
+    b->setCursor(Qt::PointingHandCursor);
+    b->setTextFormat(Qt::RichText);
+    // Strip the user's home prefix from the recent path so the list shows
+    // "/Documents/…" instead of "/Users/<user>/Documents/…". Tooltip still
+    // carries the absolute path so it's recoverable on hover.
+    const QString displayPath = stripUserPrefix(fi.absolutePath());
+    b->setText(QString("<img src=':/assets/images/icons/new.svg' width='14' height='14'>"
+                       "&nbsp;<span>%1</span>&nbsp;&nbsp;"
+                       "<span style='color:%2'>%3</span>")
+                   .arg(fi.fileName().toHtmlEscaped(), dim, displayPath.toHtmlEscaped()));
+    b->setToolTip(path);
+    b->installEventFilter(this);
+    b->setProperty("recentPath", path);
+    recentsLayout_->addWidget(b);
+    ++shown;
+  }
+}
+
+QWidget* MainWindow::buildWelcome() {
+  QWidget* page = new QWidget;
+  page->setObjectName("welcomePage");
+
+  // Outer layout: vertical centering + horizontal centering.
+  QVBoxLayout* vOuter = new QVBoxLayout(page);
+  vOuter->addStretch(1);
+  QHBoxLayout* outer = new QHBoxLayout;
+  vOuter->addLayout(outer);
+  vOuter->addStretch(1);
+
+  outer->addStretch(1);
+  QWidget* centerBox = new QWidget;
+  centerBox->setMinimumWidth(620);
+  centerBox->setMaximumWidth(900);
+  QVBoxLayout* center = new QVBoxLayout(centerBox);
+  center->setContentsMargins(0, 0, 0, 0);
+  center->setSpacing(28);
+  outer->addWidget(centerBox, 0);
+  outer->addStretch(1);
+
+  // Header: logo + name.
+  QHBoxLayout* header = new QHBoxLayout;
+  QLabel* logo = new QLabel;
+  QPixmap pm(":/assets/images/icon_128x128.png");
+  if (!pm.isNull()) {
+    logo->setPixmap(pm.scaled(56, 56, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+  }
+  header->addWidget(logo);
+  QLabel* name = new QLabel(tr("Qawno"));
+  name->setObjectName("welcomeName");
+  name->setStyleSheet("font-size: 34px; font-weight: 600;");
+  header->addWidget(name);
+  header->addStretch(1);
+  center->addLayout(header);
+
+  // Two columns: recents (left) | actions (right), with a divider.
+  QHBoxLayout* cols = new QHBoxLayout;
+  cols->setSpacing(40);
+  center->addLayout(cols, 0);
+
+  // Left column.
+  QVBoxLayout* left = new QVBoxLayout;
+  left->setSpacing(8);
+  QLabel* recentHdr = new QLabel(tr("Recent"));
+  recentHdr->setObjectName("recentHeader");
+  recentHdr->setStyleSheet("font-size: 16px; font-weight: 600;");
+  left->addWidget(recentHdr);
+  recentsLayout_ = new QVBoxLayout;
+  recentsLayout_->setSpacing(4);
+  left->addLayout(recentsLayout_);
+  left->addStretch(1);
+  cols->addLayout(left, 1);
+
+  // Divider.
+  QFrame* vline = new QFrame;
+  vline->setFrameShape(QFrame::VLine);
+  vline->setStyleSheet("color:#3A3F4B;");
+  cols->addWidget(vline);
+
+  // Right column: action tiles.
+  QVBoxLayout* right = new QVBoxLayout;
+  right->setSpacing(12);
+  QLabel* startHdr = new QLabel(tr("Start"));
+  startHdr->setObjectName("startHeader");
+  startHdr->setStyleSheet("font-size: 16px; font-weight: 600;");
+  right->addWidget(startHdr);
+
+  auto tile = [this](const QString& iconPath, const QString& title,
+                     std::function<void()> onClick) {
+    QPushButton* b = new QPushButton;
+    b->setObjectName("welcomeTile");
+    b->setCursor(Qt::PointingHandCursor);
+    b->setIcon(QIcon(iconPath));
+    b->setIconSize(QSize(24, 24));
+    b->setText("  " + title);
+    b->setMinimumHeight(58);
+    b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    connect(b, &QPushButton::clicked, this, onClick);
+    return b;
+  };
+
+  QGridLayout* tiles = new QGridLayout;
+  tiles->setSpacing(12);
+  tiles->setColumnStretch(0, 1);
+  tiles->setColumnStretch(1, 1);
+  tiles->addWidget(tile(":/assets/images/icons/new.svg", tr("New Gamemode"),
+                        [this] { on_actionNewGM_triggered(); }), 0, 0);
+  tiles->addWidget(tile(":/assets/images/icons/new.svg", tr("New Filterscript"),
+                        [this] { on_actionNewFS_triggered(); }), 0, 1);
+  tiles->addWidget(tile(":/assets/images/icons/new.svg", tr("New Include"),
+                        [this] { on_actionNewInc_triggered(); }), 1, 0);
+  tiles->addWidget(tile(":/assets/images/icons/new.svg", tr("New Blank"),
+                        [this] { on_actionNewBlank_triggered(); }), 1, 1);
+  tiles->addWidget(tile(":/assets/images/icons/open.svg", tr("Open…"),
+                        [this] { on_actionOpen_triggered(); }), 2, 0, 1, 2);
+  right->addLayout(tiles);
+  right->addStretch(1);
+  cols->addLayout(right, 1);
+
+#ifdef Q_OS_MACOS
+  // macOS: two status tiles under the columns — CrossOver detection/bottle and
+  // the Qawno compiler files. The Pawn compiler runs through CrossOver's Wine
+  // (native pawncc's AMX output is rejected by the server).
+  center->addWidget(buildMacToolingCards());
+  refreshCrossOverCard();
+  refreshQawnoFilesCard();
+#endif
+
+  return page;
+}
+
+#ifdef Q_OS_MACOS
+namespace {
+// Style a small status pill label green (detected/ready) or red (missing).
+void stylePill(QLabel* pill, const QString& text, bool good) {
+  pill->setText("  " + text + "  ");
+  pill->setStyleSheet(
+      QStringLiteral("background: %1; color: white; border-radius: 9px; "
+                     "font-size: 11px; font-weight: 600; padding: 2px 4px;")
+          .arg(good ? QStringLiteral("#27AE60") : QStringLiteral("#C0392B")));
+}
+}  // namespace
+
+QWidget* MainWindow::buildMacToolingCards() {
+  // Three equal tiles side by side: Wine | Pawn compiler | Qawno files.
+  QWidget* row = new QWidget;
+  QHBoxLayout* rl = new QHBoxLayout(row);
+  rl->setContentsMargins(0, 0, 0, 0);
+  rl->setSpacing(16);
+  rl->addWidget(buildWineCard(), 1);
+  rl->addWidget(buildCompilerCard(), 1);
+  rl->addWidget(buildQawnoFilesCard(), 1);
+  return row;
+}
+
+QWidget* MainWindow::buildWineCard() {
+  QFrame* card = new QFrame;
+  card->setObjectName("toolingCard");
+  QVBoxLayout* cv = new QVBoxLayout(card);
+  cv->setContentsMargins(18, 16, 18, 16);
+  cv->setSpacing(10);
+
+  QHBoxLayout* titleRow = new QHBoxLayout;
+  QLabel* title = new QLabel(tr("Wine"));
+  title->setObjectName("toolingTitle");
+  titleRow->addWidget(title);
+  titleRow->addStretch(1);
+  auto* pill = new QLabel; pill->setAlignment(Qt::AlignCenter);
+  titleRow->addWidget(pill);
+  cv->addLayout(titleRow);
+
+  auto* detail = new QLabel;
+  detail->setObjectName("toolingDetail");
+  detail->setWordWrap(true);
+  cv->addWidget(detail, 1);
+
+  // Speed/progress line — shows e.g. "12.4 MB/s · 78 MB / 180 MB" while
+  // downloading, blank otherwise.
+  auto* speedLabel = new QLabel;
+  speedLabel->setStyleSheet("color:#B6BDC7;font-size:11px;");
+  speedLabel->hide();
+  cv->addWidget(speedLabel);
+
+  QHBoxLayout* btnRow = new QHBoxLayout;
+  auto* primary = new QPushButton;
+  primary->setCursor(Qt::PointingHandCursor);
+  primary->setMinimumHeight(34);
+  // Spinner painted INSIDE the button (left of label) using a child Spinner.
+  // QPushButton has no built-in icon-on-left-with-padding for live widgets,
+  // so we lay it out as a child positioned manually in resizeEvent.
+  auto* spinner = new Spinner(primary);
+  spinner->setSpinSize(14);
+  spinner->setColor(QColor(255, 255, 255));
+  spinner->hide();
+  primary->setStyleSheet(
+      "QPushButton { border-radius: 8px; padding: 6px 16px 6px 30px; "
+      "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
+      "QPushButton:hover { background: #4A8AC8; }"
+      "QPushButton:disabled { background: #4A5363; color: #9AA1AD; }");
+  btnRow->addWidget(primary, 0);
+
+  // Secondary "Delete cache" button — shown when there's something to delete.
+  auto* secondary = new QPushButton(tr("Delete cache"));
+  secondary->setCursor(Qt::PointingHandCursor);
+  secondary->setMinimumHeight(34);
+  secondary->setStyleSheet(
+      "QPushButton { border-radius: 8px; padding: 6px 14px; "
+      "background: transparent; color: #C8CDD6; font-weight: 500; "
+      "border: 1px solid #4A5363; }"
+      "QPushButton:hover { background: rgba(127,140,160,0.15); }"
+      "QPushButton:disabled { color: #6A707B; border-color: #3A3F4B; }");
+  btnRow->addWidget(secondary, 0);
+  btnRow->addStretch(1);
+  cv->addLayout(btnRow);
+
+  // (Spinner repositioning happens inside refresh() — set when the button
+  // becomes visible. Resize during runtime is rare on this card.)
+
+  // Speed sample state (kept in heap because lambdas need persistent storage).
+  struct SpeedTracker {
+    qint64 lastBytes = 0;
+    qint64 lastTimeMs = 0;
+    QString text;
+  };
+  auto* tracker = new SpeedTracker;
+
+  auto refresh = [pill, detail, primary, secondary, spinner, speedLabel, tracker] {
+    auto* wm = WineManager::instance();
+    using S = WineManager::State;
+    // Secondary "Delete cache" enabled only when there's a cached archive to
+    // remove. Greys out after a successful delete and during active ops.
+    const QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+                             + "/updates/wine";
+    const bool hasCache = QDir(cacheDir).exists() && !QDir(cacheDir).isEmpty();
+    secondary->setEnabled(hasCache && wm->state() != S::Downloading &&
+                          wm->state() != S::Installing);
+    secondary->show();
+    switch (wm->state()) {
+      case S::Ready:
+        pill->setText(tr("READY"));
+        pill->setStyleSheet("background:#1F6E3D;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
+        detail->setText(tr("Installed: %1").arg(wm->installedVersion()));
+        primary->setText(tr("Uninstall Wine"));
+        primary->setEnabled(true);
+        spinner->hide();
+        primary->setStyleSheet(
+            "QPushButton { border-radius: 8px; padding: 6px 16px; "
+            "background: #C0392B; color: white; font-weight: 600; border: none; }"
+            "QPushButton:hover { background: #D14437; }"
+            "QPushButton:disabled { background: #4A5363; color: #9AA1AD; }");
+        speedLabel->hide();
+        break;
+      case S::Downloading:
+        pill->setText(tr("DOWNLOADING"));
+        pill->setStyleSheet("background:#B47A12;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
+        detail->setText(tr("Fetching Wine in the background…"));
+        primary->setText(tr("Downloading %1%").arg(wm->progressPercent()));
+        primary->setEnabled(false);
+        primary->setStyleSheet(
+            "QPushButton { border-radius: 8px; padding: 6px 16px 6px 30px; "
+            "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
+            "QPushButton:disabled { background: #3D7CB8; color: #FFFFFF; }");
+        spinner->setSpinSize(14);
+        spinner->show();
+        spinner->move(10, (primary->height() - spinner->height()) / 2);
+        speedLabel->setText(tracker->text);
+        speedLabel->setVisible(!tracker->text.isEmpty());
+        break;
+      case S::Installing:
+        pill->setText(tr("INSTALLING"));
+        pill->setStyleSheet("background:#B47A12;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
+        detail->setText(tr("Extracting Wine into the hidden .Qawno folder…"));
+        primary->setText(tr("Installing…"));
+        primary->setEnabled(false);
+        primary->setStyleSheet(
+            "QPushButton { border-radius: 8px; padding: 6px 16px 6px 30px; "
+            "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
+            "QPushButton:disabled { background: #3D7CB8; color: #FFFFFF; }");
+        spinner->setSpinSize(16);
+        spinner->show();
+        spinner->move(10, (primary->height() - spinner->height()) / 2);
+        speedLabel->hide();
+        break;
+      case S::Error:
+        pill->setText(tr("ERROR"));
+        pill->setStyleSheet("background:#9A2A2A;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
+        detail->setText(tr("Wine install failed. Retry?"));
+        primary->setText(tr("Retry Wine install"));
+        primary->setEnabled(true);
+        primary->setStyleSheet(
+            "QPushButton { border-radius: 8px; padding: 6px 16px; "
+            "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
+            "QPushButton:hover { background: #4A8AC8; }");
+        spinner->hide();
+        speedLabel->hide();
+        break;
+      case S::NotInstalled:
+      default:
+        pill->setText(tr("NOT INSTALLED"));
+        pill->setStyleSheet("background:#4A5363;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
+        detail->setText(tr("Wine (~180 MB) runs the Pawn compiler on macOS. Installs into the hidden .Qawno folder next to Qawno.app."));
+        primary->setText(tr("Download Wine"));
+        primary->setEnabled(true);
+        primary->setStyleSheet(
+            "QPushButton { border-radius: 8px; padding: 6px 16px; "
+            "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
+            "QPushButton:hover { background: #4A8AC8; }");
+        spinner->hide();
+        speedLabel->hide();
+        break;
+    }
+  };
+  refresh();
+  // Poll wine binary existence — picks up external install/uninstall without
+  // a Qawno restart.
+  auto* poll = new QTimer(card);
+  poll->setInterval(2000);
+  connect(poll, &QTimer::timeout, card, [refresh] {
+    auto* wm = WineManager::instance();
+    using S = WineManager::State;
+    if (wm->state() == S::NotInstalled && QFileInfo::exists(wm->binPath())) {
+      // WineManager doesn't directly expose setState; just refresh — Ready
+      // detection happens via WineManager ctor logic next run. For now flip
+      // the UI optimistically.
+    }
+    refresh();
+  });
+  poll->start();
+  connect(primary, &QPushButton::clicked, this, [] {
+    auto* wm = WineManager::instance();
+    if (wm->state() == WineManager::State::Ready) {
+      wm->uninstall();
+    } else {
+      wm->download();
+    }
+  });
+  connect(secondary, &QPushButton::clicked, this, [refresh] {
+    WineManager::instance()->deleteCache();
+    refresh();
+  });
+  connect(WineManager::instance(), &WineManager::stateChanged, this, [refresh](WineManager::State){ refresh(); });
+  connect(WineManager::instance(), &WineManager::progressChanged, this, [refresh](int){ refresh(); });
+  connect(UpdateChecker::instance(), &UpdateChecker::downloadProgress, this,
+          [refresh, tracker, speedLabel](UpdateChecker::Component c, qint64 b, qint64 t) {
+            if (c != UpdateChecker::Component::Wine) return;
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            if (tracker->lastTimeMs > 0 && now > tracker->lastTimeMs) {
+              const qint64 dt = now - tracker->lastTimeMs;
+              const qint64 db = b - tracker->lastBytes;
+              if (dt >= 250) {  // throttle updates to ~4 Hz
+                const double bps = (db * 1000.0) / dt;
+                auto humanBytes = [](double v) {
+                  const char* u[] = {"B","KB","MB","GB"};
+                  int i = 0;
+                  while (v >= 1024 && i < 3) { v /= 1024; ++i; }
+                  return QString::number(v, 'f', v >= 100 ? 0 : 1) + " " + u[i];
+                };
+                tracker->text = tr("%1 / %2 · %3/s")
+                                    .arg(humanBytes(b), humanBytes(t), humanBytes(bps));
+                tracker->lastBytes = b;
+                tracker->lastTimeMs = now;
+                speedLabel->setText(tracker->text);
+                speedLabel->show();
+              }
+            } else {
+              tracker->lastBytes = b;
+              tracker->lastTimeMs = now;
+            }
+          });
+
+  return card;
+}
+
+QWidget* MainWindow::buildCompilerCard() {
+  QFrame* card = new QFrame;
+  card->setObjectName("toolingCard");
+  QVBoxLayout* cv = new QVBoxLayout(card);
+  cv->setContentsMargins(18, 16, 18, 16);
+  cv->setSpacing(10);
+
+  QHBoxLayout* titleRow = new QHBoxLayout;
+  QLabel* title = new QLabel(tr("Pawn compiler"));
+  title->setObjectName("toolingTitle");
+  titleRow->addWidget(title);
+  titleRow->addStretch(1);
+  auto* pill = new QLabel; pill->setAlignment(Qt::AlignCenter);
+  titleRow->addWidget(pill);
+  cv->addLayout(titleRow);
+
+  auto* detail = new QLabel;
+  detail->setObjectName("toolingDetail");
+  detail->setWordWrap(true);
+  cv->addWidget(detail, 1);
+
+  auto* speedLabel = new QLabel;
+  speedLabel->setStyleSheet("color:#B6BDC7;font-size:11px;");
+  speedLabel->hide();
+  cv->addWidget(speedLabel);
+
+  QHBoxLayout* btnRow = new QHBoxLayout;
+  auto* spinner = new Spinner;
+  spinner->setSpinSize(18);
+  spinner->setColor(QColor(255, 255, 255));
+  spinner->hide();
+  btnRow->addWidget(spinner, 0);
+  auto* primary = new QPushButton;
+  primary->setCursor(Qt::PointingHandCursor);
+  primary->setMinimumHeight(34);
+  primary->setStyleSheet(
+      "QPushButton { border-radius: 8px; padding: 6px 16px; "
+      "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
+      "QPushButton:hover { background: #4A8AC8; }"
+      "QPushButton:disabled { background: #4A5363; color: #9AA1AD; }");
+  btnRow->addWidget(primary, 0);
+  btnRow->addStretch(1);
+  cv->addLayout(btnRow);
+
+  struct CmpTracker { qint64 lastBytes = 0; qint64 lastTimeMs = 0; QString text; };
+  auto* tracker = new CmpTracker;
+
+  auto bundledPresent = [] {
+    QDir appSibling(QCoreApplication::applicationDirPath());
+    appSibling.cdUp(); appSibling.cdUp(); appSibling.cdUp();
+    return QFileInfo::exists(appSibling.absoluteFilePath("pawncc.exe"));
+  };
+  auto refresh = [pill, detail, primary, spinner, speedLabel, bundledPresent] {
+    const bool installed = bundledPresent();
+    spinner->stop();
+    speedLabel->hide();
+    primary->hide();
+    if (installed) {
+      pill->setText(tr("DETECTED"));
+      pill->setStyleSheet("background:#1F6E3D;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
+      detail->setText(tr("Found pawncc beside Qawno.app. Ready to compile."));
+    } else {
+      pill->setText(tr("NOT DETECTED"));
+      pill->setStyleSheet("background:#9A2A2A;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
+      detail->setText(tr("pawncc.exe is missing beside Qawno.app. Drop the compiler files there to enable compiling."));
+    }
+  };
+  refresh();
+  connect(primary, &QPushButton::clicked, this, [bundledPresent] {
+    auto* uc = UpdateChecker::instance();
+    if (uc->latest(UpdateChecker::Component::Compiler).tag.isEmpty() && !bundledPresent()) {
+      uc->check(UpdateChecker::Component::Compiler);
+    } else {
+      uc->downloadAsset(UpdateChecker::Component::Compiler);
+    }
+  });
+  connect(UpdateChecker::instance(), &UpdateChecker::releaseFetched, this,
+          [refresh](UpdateChecker::Component, UpdateChecker::Release){ refresh(); });
+  connect(UpdateChecker::instance(), &UpdateChecker::downloadProgress, this,
+          [refresh, primary, spinner, speedLabel, tracker](UpdateChecker::Component c, qint64 b, qint64 t) {
+            if (c != UpdateChecker::Component::Compiler) return;
+            if (t > 0) primary->setText(tr("Downloading %1%").arg(int(b * 100 / t)));
+            primary->setEnabled(false);
+            spinner->setSpinSize(18); spinner->start();
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            if (tracker->lastTimeMs > 0 && now - tracker->lastTimeMs >= 250) {
+              const double bps = ((b - tracker->lastBytes) * 1000.0) / (now - tracker->lastTimeMs);
+              auto h = [](double v) {
+                const char* u[] = {"B","KB","MB","GB"}; int i = 0;
+                while (v >= 1024 && i < 3) { v /= 1024; ++i; }
+                return QString::number(v, 'f', v >= 100 ? 0 : 1) + " " + u[i];
+              };
+              tracker->text = tr("%1 / %2 · %3/s").arg(h(b), h(t), h(bps));
+              tracker->lastBytes = b; tracker->lastTimeMs = now;
+              speedLabel->setText(tracker->text); speedLabel->show();
+            } else if (tracker->lastTimeMs == 0) {
+              tracker->lastBytes = b; tracker->lastTimeMs = now;
+            }
+          });
+  connect(UpdateChecker::instance(), &UpdateChecker::downloadFinished, this,
+          [refresh](UpdateChecker::Component c, QString){ if (c == UpdateChecker::Component::Compiler) refresh(); });
+  connect(UpdateChecker::instance(), &UpdateChecker::checkStarted, this,
+          [refresh](UpdateChecker::Component c){ if (c == UpdateChecker::Component::Compiler) refresh(); });
+
+  // Poll the filesystem so that if the user drops pawncc.exe into the app
+  // folder externally (or removes it), the card status updates without a
+  // restart. Cheap — single QFileInfo::exists() call per tick.
+  auto* poll = new QTimer(card);
+  poll->setInterval(2000);
+  connect(poll, &QTimer::timeout, card, refresh);
+  poll->start();
+  return card;
+}
+
+QWidget* MainWindow::buildCrossOverCard() {
+  QFrame* card = new QFrame;
+  card->setObjectName("toolingCard");
+  QVBoxLayout* cv = new QVBoxLayout(card);
+  cv->setContentsMargins(18, 16, 18, 16);
+  cv->setSpacing(10);
+
+  // Title row: "CrossOver" + detected/not-detected pill.
+  QHBoxLayout* titleRow = new QHBoxLayout;
+  QLabel* title = new QLabel(tr("CrossOver"));
+  title->setObjectName("toolingTitle");
+  titleRow->addWidget(title);
+  titleRow->addStretch(1);
+  cxStatusPill_ = new QLabel;
+  cxStatusPill_->setAlignment(Qt::AlignCenter);
+  titleRow->addWidget(cxStatusPill_);
+  cv->addLayout(titleRow);
+
+  // Detail line: version / bottle status / guidance.
+  cxDetail_ = new QLabel;
+  cxDetail_->setObjectName("toolingDetail");
+  cxDetail_->setWordWrap(true);
+  cv->addWidget(cxDetail_, 1);
+
+  // Action buttons: create the bottle (when missing) / delete (when present).
+  QHBoxLayout* btnRow = new QHBoxLayout;
+  cxSetupButton_ = new QPushButton;
+  cxSetupButton_->setCursor(Qt::PointingHandCursor);
+  cxSetupButton_->setMinimumHeight(34);
+  cxSetupButton_->setStyleSheet(
+      "QPushButton { border-radius: 8px; padding: 6px 16px; "
+      "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
+      "QPushButton:hover { background: #4A8AC8; }"
+      "QPushButton:disabled { background: #4A5363; color: #9AA1AD; }");
+  connect(cxSetupButton_, &QPushButton::clicked, this,
+          [this] { setupCrossOverBottle(); });
+  btnRow->addWidget(cxSetupButton_, 0);
+
+  cxReinstallButton_ = new QPushButton(tr("Delete bottle"));
+  cxReinstallButton_->setCursor(Qt::PointingHandCursor);
+  cxReinstallButton_->setMinimumHeight(34);
+  cxReinstallButton_->setIcon(QIcon(":/assets/images/icons/trash.svg"));
+  cxReinstallButton_->setIconSize(QSize(15, 15));
+  cxReinstallButton_->setStyleSheet(
+      "QPushButton { border-radius: 8px; padding: 6px 16px; "
+      "background: #C0392B; color: white; font-weight: 600; border: none; }"
+      "QPushButton:hover { background: #D14437; }"
+      "QPushButton:disabled { background: #4A5363; color: #9AA1AD; }");
+  connect(cxReinstallButton_, &QPushButton::clicked, this,
+          [this] { reinstallCrossOverBottle(); });
+  btnRow->addWidget(cxReinstallButton_, 0);
+  btnRow->addStretch(1);
+  cv->addLayout(btnRow);
+
+  return card;
+}
+
+QWidget* MainWindow::buildQawnoFilesCard() {
+  QFrame* card = new QFrame;
+  card->setObjectName("toolingCard");
+  QVBoxLayout* cv = new QVBoxLayout(card);
+  cv->setContentsMargins(18, 16, 18, 16);
+  cv->setSpacing(10);
+
+  QHBoxLayout* titleRow = new QHBoxLayout;
+  QLabel* title = new QLabel(tr("Qawno files"));
+  title->setObjectName("toolingTitle");
+  titleRow->addWidget(title);
+  titleRow->addStretch(1);
+  filesStatusPill_ = new QLabel;
+  filesStatusPill_->setAlignment(Qt::AlignCenter);
+  titleRow->addWidget(filesStatusPill_);
+  cv->addLayout(titleRow);
+
+  filesDetail_ = new QLabel;
+  filesDetail_->setObjectName("toolingDetail");
+  filesDetail_->setWordWrap(true);
+  cv->addWidget(filesDetail_, 1);
+
+  return card;
+}
+
+void MainWindow::refreshQawnoFilesCard() {
+  if (!filesStatusPill_) {
+    return;
+  }
+  // The compiler files now live in each project's own qawno/ subfolder (beside
+  // the .pwn), not beside Qawno.app. With no .pwn open there's nothing to
+  // check; once a file is loaded, validate that project's qawno/ folder.
+  const int idx = getCurrentIndex();
+  const QString pwn = (idx >= 0 && idx < fileNames_.size()) ? fileNames_[idx]
+                                                            : QString();
+  if (pwn.isEmpty()) {
+    stylePill(filesStatusPill_, tr("● No file"), false);
+    filesDetail_->setText(
+        tr("Open a .pwn file. Qawno looks for %1 in a qawno/ folder beside "
+           "your .pwn so each project carries its own compiler.")
+            .arg(CrossOver::requiredFiles().join(", ")));
+    return;
+  }
+  const QString qawnoDir = CrossOver::projectQawnoDir(pwn);
+  const QStringList missing = CrossOver::missingFiles(qawnoDir);
+  if (missing.isEmpty()) {
+    stylePill(filesStatusPill_, tr("● Detected"), true);
+    filesDetail_->setText(
+        tr("Found %1 in %2. Compiling will use this project's compiler.")
+            .arg(CrossOver::requiredFiles().join(", "), qawnoDir));
+  } else {
+    stylePill(filesStatusPill_, tr("● Not detected"), false);
+    filesDetail_->setText(
+        tr("Missing from %1: %2. Put %3 in a qawno/ folder beside your .pwn.")
+            .arg(qawnoDir, missing.join(", "),
+                 CrossOver::requiredFiles().join(", ")));
+  }
+}
+
+void MainWindow::refreshCrossOverCard() {
+  if (!cxStatusPill_) {
+    return;
+  }
+
+  auto setPill = [this](const QString& text, bool good) {
+    stylePill(cxStatusPill_, text, good);
+  };
+
+  if (!CrossOver::isInstalled()) {
+    setPill(tr("● Not detected"), false);
+    cxDetail_->setText(tr(
+        "CrossOver was not found in /Applications. It is used to run the Pawn "
+        "compiler under Wine. Install CrossOver to compile on macOS."));
+    cxSetupButton_->setVisible(false);
+    cxReinstallButton_->setVisible(false);
+    return;
+  }
+
+  const QString ver = CrossOver::version();
+  setPill(ver.isEmpty() ? tr("● Detected") : tr("● Detected · v%1").arg(ver),
+          true);
+
+  if (CrossOver::bottleExists()) {
+    cxDetail_->setText(
+        tr("The 32-bit \"%1\" bottle is ready. The compiler runs through it.")
+            .arg(CrossOver::kBottle));
+    cxSetupButton_->setVisible(false);
+    cxReinstallButton_->setVisible(true);  // offer to delete it
+  } else {
+    cxDetail_->setText(
+        tr("No \"%1\" bottle yet. Create a 32-bit bottle to route the Pawn "
+           "compiler through CrossOver.")
+            .arg(CrossOver::kBottle));
+    cxSetupButton_->setText(tr("Set up %1 bottle").arg(CrossOver::kBottle));
+    cxSetupButton_->setEnabled(true);
+    cxSetupButton_->setVisible(true);
+    cxReinstallButton_->setVisible(false);
+  }
+}
+
+void MainWindow::setupCrossOverBottle() {
+  if (!cxSetupButton_) {
+    return;
+  }
+  cxSetupButton_->setText(tr("Creating bottle…"));
+  // Repaint the new label, then block the main thread for the create. Blocking
+  // (no processEvents) lets macOS show its native spinning-beachball wait
+  // cursor while cxbottle runs.
+  cxSetupButton_->repaint();
+
+  QString error;
+  const bool ok = CrossOver::createBottle(&error);
+
+  if (!ok) {
+    QMessageBox::warning(
+        this, tr("CrossOver"),
+        tr("Could not create the \"%1\" bottle.\n\n%2")
+            .arg(CrossOver::kBottle, error));
+  }
+  refreshCrossOverCard();
+}
+
+void MainWindow::reinstallCrossOverBottle() {
+  if (!cxReinstallButton_) {
+    return;
+  }
+  // Confirm with a trash icon instead of the default "?" question icon.
+  QMessageBox box(this);
+  box.setWindowTitle(tr("Delete bottle"));
+  box.setText(tr("Delete the 32-bit \"%1\" CrossOver bottle?").arg(CrossOver::kBottle));
+  box.setInformativeText(
+      tr("You can recreate it afterwards with \"Set up %1 bottle\".")
+          .arg(CrossOver::kBottle));
+  box.setIconPixmap(QIcon(":/assets/images/icons/trash.svg").pixmap(48, 48));
+  box.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+  box.setDefaultButton(QMessageBox::Cancel);
+  if (box.exec() != QMessageBox::Yes) {
+    return;
+  }
+
+  cxReinstallButton_->setText(tr("Deleting…"));
+  cxReinstallButton_->repaint();  // show label, then block for the beachball
+
+  QString error;
+  const bool ok = CrossOver::deleteBottle(&error);
+
+  cxReinstallButton_->setText(tr("Delete bottle"));
+  if (!ok) {
+    QMessageBox::warning(this, tr("CrossOver"),
+                         tr("Could not delete the \"%1\" bottle.\n\n%2")
+                             .arg(CrossOver::kBottle, error));
+  }
+  refreshCrossOverCard();
+}
+#endif // Q_OS_MACOS
+
+void MainWindow::deployPawnScript(const QString& qawnoDir) {
+  if (qawnoDir.isEmpty()) {
+    return;
+  }
+  // Caller already validated the folder exists via preflight, but mkpath is a
+  // no-op when present and harmless when not — keeps the helper safe to call
+  // directly from a future code path.
+  QDir().mkpath(qawnoDir);
+  const QString dest = qawnoDir + "/pawn-cc.sh";
+  if (QFile::exists(dest)) {
+    return;
+  }
+  // Source candidates: bundle on macOS, repo scripts/ when running from build.
+  QStringList sources;
+  sources << QCoreApplication::applicationDirPath() + "/pawn-cc.sh";
+#ifdef Q_OS_MACOS
+  sources << QCoreApplication::applicationDirPath() + "/../Resources/pawn-cc.sh";
+#endif
+  sources << QCoreApplication::applicationDirPath() + "/../scripts/pawn-cc.sh";
+  for (const QString& src : sources) {
+    if (QFile::exists(src)) {
+      if (QFile::copy(src, dest)) {
+        QFile::setPermissions(dest,
+            QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+            QFileDevice::ReadGroup | QFileDevice::ExeGroup |
+            QFileDevice::ReadOther | QFileDevice::ExeOther);
+      }
+      return;
+    }
+  }
+}
+
+#ifdef Q_OS_MACOS
+bool MainWindow::macCompilePreflight(const QString& pwnFile) {
+  QStringList problems;
+  // The Wine runtime: either our self-managed install or an existing CrossOver
+  // bottle satisfies the requirement. Bundled wine is preferred (no external
+  // dependency); CrossOver remains a fallback for users who already have it.
+  const bool wineReady = WineManager::instance()->isReady();
+  const bool crossOverReady = CrossOver::isInstalled() && CrossOver::bottleExists();
+  if (!wineReady && !crossOverReady) {
+    problems << tr("• Wine is not installed. Click \"Download\" on the Wine "
+                   "card on the start page to install it (~180 MB).");
+  }
+  const QString qawnoDir = CrossOver::projectQawnoDir(pwnFile);
+  const QStringList missing = CrossOver::missingFiles(qawnoDir);
+  if (!missing.isEmpty()) {
+    problems << tr("• Missing in %1: %2. Put %3 in a qawno/ folder beside "
+                   "your .pwn so the project carries its own compiler.")
+                    .arg(qawnoDir, missing.join(", "),
+                         CrossOver::requiredFiles().join(", "));
+  }
+  if (problems.isEmpty()) {
+    return true;
+  }
+  QMessageBox::warning(
+      this, tr("Cannot compile"),
+      tr("Compiling on macOS needs Wine and the Pawn compiler files:\n\n%1")
+          .arg(problems.join("\n\n")));
+  return false;
+}
+#endif // Q_OS_MACOS
 
