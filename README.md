@@ -30,14 +30,32 @@ Same Qawno you know, rebuilt for macOS with everything the original couldn't shi
 Download
 --------
 
-Grab the signed `Qawno.app` from
-[**Releases**](https://github.com/Mac-Andreas/Qawno-macOS/releases/latest).
+Grab `Qawno.app` (zipped) from
+[**Releases**](https://github.com/Mac-Andreas/Qawno-macOS/releases/latest), then
+unzip it.
 
 1. Drag `Qawno.app` to `/Applications` (or anywhere).
 2. Double-click. macOS asks once for Documents access — say yes if your projects live there.
 3. Open a `.pwn` and compile — the native compiler is already bundled.
 
 That's it. No Xcode, no CrossOver, no Wine.
+
+### First launch — "unidentified developer"
+
+The app is **self-signed (ad-hoc), not notarized** — Apple notarization isn't
+available for this build, so Gatekeeper will warn on first launch. It's safe to
+open; you just have to tell macOS so once:
+
+- **Right-click** `Qawno.app` → **Open** → **Open** in the dialog, **or**
+- After macOS blocks it, go to **System Settings → Privacy & Security** and click
+  **Open Anyway**, **or**
+- From a terminal, clear the quarantine flag:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/Qawno.app
+  ```
+
+After the first successful open, it launches normally.
 
 ---
 
