@@ -17,25 +17,17 @@
 #define CROSSOVER_H
 
 #include <QString>
-#include <QStringList>
 
-// Project compiler-file helpers for the macOS build.
+// Project path helper for the macOS build.
 //
 // Historically this routed compilation through CrossOver's Wine; the macOS
-// build now ships a native pawncc, so only the small path utilities remain.
-// The name is kept to avoid churning call sites.
+// build now ships a native pawncc, so only this small utility remains. The
+// name is kept to avoid churning call sites.
 class CrossOver {
  public:
-  // The native compiler artefacts that live in a project's qawno/native/
-  // folder. pawncc resolves libpawnc.dylib from its own directory.
-  static QStringList requiredFiles();         // file names, in display order
-
   // Walk up from a .pwn to the project's qawno/ folder (parent of gamemodes/,
   // includes/, …). Falls back to <pwnDir>/qawno when none is found.
   static QString projectQawnoDir(const QString& pwnFile);
-
-  // Of requiredFiles(), which are absent from <qawnoDir>/native/.
-  static QStringList missingFiles(const QString& qawnoDir);
 };
 
 #endif // CROSSOVER_H

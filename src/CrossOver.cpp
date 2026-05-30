@@ -18,13 +18,6 @@
 #include <QDir>
 #include <QFileInfo>
 
-QStringList CrossOver::requiredFiles() {
-  // The native compiler pair deployed into the project's qawno/native/ folder:
-  // pawncc resolves libpawnc.dylib from its own directory via @loader_path.
-  return {QStringLiteral("native/pawncc"),
-          QStringLiteral("native/libpawnc.dylib")};
-}
-
 QString CrossOver::projectQawnoDir(const QString& pwnFile) {
   if (pwnFile.isEmpty()) {
     return QString();
@@ -43,18 +36,4 @@ QString CrossOver::projectQawnoDir(const QString& pwnFile) {
     if (!d.cdUp()) break;
   }
   return QFileInfo(pwnFile).absolutePath() + QStringLiteral("/qawno");
-}
-
-QStringList CrossOver::missingFiles(const QString& qawnoDir) {
-  QStringList missing;
-  if (qawnoDir.isEmpty() || !QFileInfo(qawnoDir).isDir()) {
-    // Whole folder absent — every required file is missing.
-    return requiredFiles();
-  }
-  for (const QString& f : requiredFiles()) {
-    if (!QFileInfo::exists(qawnoDir + QStringLiteral("/") + f)) {
-      missing << f;
-    }
-  }
-  return missing;
 }

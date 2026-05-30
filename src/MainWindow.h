@@ -149,21 +149,9 @@ class MainWindow: public QMainWindow {
   void buildTopControls();
   // Builds the VS Code-style start page shown when no files are open.
   QWidget* buildWelcome();
-  // macOS: builds the two status tiles on the welcome page — CrossOver (detect
-  // + 32-bit Qawno bottle) and Qawno files (the compiler files that must sit in
-  // the qawno folder). Returns a row widget holding both.
-  QWidget* buildMacToolingCards();
-  QWidget* buildCrossOverCard();
-  QWidget* buildQawnoFilesCard();
-  QWidget* buildWineCard();
-  QWidget* buildCompilerCard();
   // Re-tints every QAction icon for the current theme. Called from applyTheme
   // so dark-on-dark icons swap to a light tint (and vice versa).
   void applyThemedActionIcons(bool dark);
-  void refreshCrossOverCard();
-  void refreshQawnoFilesCard();
-  void setupCrossOverBottle();
-  void reinstallCrossOverBottle();
   // Preflight before compiling on macOS: CrossOver installed, Qawno bottle
   // present, and the project's qawno/ folder. Shows an error and returns false
   // if it can't be located.
@@ -245,14 +233,6 @@ class MainWindow: public QMainWindow {
   bool sidebarAutoHidden_ = false;
   QWidget* welcomeWidget_ = nullptr;
   QVBoxLayout* recentsLayout_ = nullptr;
-  // macOS CrossOver card widgets (null on non-macOS builds).
-  QLabel* cxStatusPill_ = nullptr;
-  QLabel* cxDetail_ = nullptr;
-  QPushButton* cxSetupButton_ = nullptr;
-  QPushButton* cxReinstallButton_ = nullptr;
-  // macOS "Qawno files" card widgets.
-  QLabel* filesStatusPill_ = nullptr;
-  QLabel* filesDetail_ = nullptr;
   int themeMode_ = 0; // 0 = system, 1 = light, 2 = dark.
   // Tab bar hover-to-close: index of the currently hovered tab (-1 = none).
   int hoveredTabIndex_ = -1;
