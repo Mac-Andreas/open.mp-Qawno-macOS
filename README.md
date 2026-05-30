@@ -5,7 +5,7 @@ A native macOS port of [Qawno](https://github.com/openmultiplayer/qawno), the
 open.mp Pawn editor. Apple Silicon + Intel, dark/light themes, a bundled native
 Pawn compiler (no Wine), and native macOS chrome.
 
-[![Latest release](https://img.shields.io/github/v/release/Mac-Andreas/open.mp-Qawno-macOS?label=download&style=flat-square)](https://github.com/Mac-Andreas/open.mp-Qawno-macOS/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/Mac-Andreas/Qawno-macOS?label=download&style=flat-square)](https://github.com/Mac-Andreas/Qawno-macOS/releases/latest)
 
 ---
 
@@ -31,7 +31,7 @@ Download
 --------
 
 Grab the signed `Qawno.app` from
-[**Releases**](https://github.com/Mac-Andreas/open.mp-Qawno-macOS/releases/latest).
+[**Releases**](https://github.com/Mac-Andreas/Qawno-macOS/releases/latest).
 
 1. Drag `Qawno.app` to `/Applications` (or anywhere).
 2. Double-click. macOS asks once for Documents access — say yes if your projects live there.
