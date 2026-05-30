@@ -62,14 +62,11 @@ After the first successful open, it launches normally.
 Compiling a Pawn project
 ------------------------
 
-open.mp / SA-MP projects expect this Windows-style layout:
+open.mp / SA-MP projects use this layout:
 
 ```
 your-project/
-├── qawno/                  ← drop the Windows pawncc files here
-│   ├── pawncc.exe
-│   ├── pawnc.dll
-│   ├── libpawnc.so         (optional)
+├── qawno/
 │   └── include/            ← .inc files
 ├── gamemodes/
 │   └── your.pwn
@@ -77,10 +74,40 @@ your-project/
 └── plugins/
 ```
 
-1. **Get pawncc** — Windows release from
-   <https://github.com/openmultiplayer/compiler/releases/latest>. Unzip into the project's `qawno/` folder. You only need `pawncc.exe`, `pawnc.dll`, and the `include/` directory.
-2. **Open the project in Qawno** — drag the folder onto `Qawno.app`, or `File → Open` a `.pwn` inside it.
-3. **Compile** — click **Compile** (or `⌘B`). Qawno walks up from the `.pwn` to find the `qawno/` folder, deploys the native `pawncc` into `qawno/native/`, runs it, and writes the `.amx` beside your `.pwn`.
+1. **Open the project in Qawno** — drag the folder onto `Qawno.app`, or `File → Open` a `.pwn` inside it.
+2. **Compile** — click **Compile** (or `⌘B`). Qawno walks up from the `.pwn` to find the `qawno/` folder, deploys the bundled native `pawncc` into `qawno/native/`, runs it, and writes the `.amx` beside your `.pwn`. No pawncc download, no Wine.
+
+### Prefer VS Code? Use the Open Pawn extension
+
+If you'd rather work in **VS Code** (or Cursor / VSCodium), the same native,
+Wine-free compiler is available as an extension:
+
+**[Open Pawn — on the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=Mac-Andreas.open-pawn)**
+
+```sh
+code --install-extension Mac-Andreas.open-pawn
+```
+
+It bundles a native `pawncc` for Windows, macOS, and Linux, plus full editor
+tooling:
+
+| Feature | Open Pawn (VS Code) | Qawno (this app) |
+| --- | :---: | :---: |
+| Native compiler — no Wine | Yes | Yes |
+| Bundled compiler (Win / macOS / Linux) | Yes | macOS |
+| Syntax highlighting | Yes | Yes |
+| Snippets | Yes | Yes |
+| Autocomplete / IntelliSense | Yes | Yes |
+| Hover · Go-to-definition | Yes | — |
+| Document / workspace symbols | Yes | — |
+| Code folding | Yes | — |
+| Document formatter | Yes | — |
+| Build task · compile-on-save | Yes | Compile button |
+| Problems-panel diagnostics | Yes | Output panel |
+| Cross-platform editor | Yes (VS Code) | macOS only |
+
+Use whichever fits your workflow — both produce the same open.mp-compatible
+`.amx` (magic `0xF1E0`).
 
 ### Running the open.mp server with the compiled .amx
 
@@ -91,11 +118,9 @@ Qawno produces a `.amx` byte-identical to one built on Windows. Three ways to ru
 * **Linux server**
   Drop the project onto your Linux box and run the open.mp Linux `omp-server` binary that ships with the server release.
 * **Locally on macOS via Wine**
-  `wine omp-server.exe` from inside the project. To reuse Qawno's bundled Wine prefix instead of installing a separate one:
-  ```sh
-  export WINEPREFIX="$(pwd)/.Qawno/wine/prefix"
-  open -a "Qawno.app/Contents/Resources/wine/wine64" omp-server.exe
-  ```
+  The open.mp *server* is Windows-only, so to run it on macOS you need your own
+  Wine/CrossOver install: `wine omp-server.exe` from inside the project.
+  (Qawno itself no longer bundles Wine — only the *compiler* is native.)
 
 ---
 
