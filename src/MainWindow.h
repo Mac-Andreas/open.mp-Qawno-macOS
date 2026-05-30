@@ -152,10 +152,12 @@ class MainWindow: public QMainWindow {
   // Re-tints every QAction icon for the current theme. Called from applyTheme
   // so dark-on-dark icons swap to a light tint (and vice versa).
   void applyThemedActionIcons(bool dark);
-  // Preflight before compiling on macOS: CrossOver installed, Qawno bottle
-  // present, and the project's qawno/ folder. Shows an error and returns false
-  // if it can't be located.
+  // Preflight before compiling on macOS: confirms the project's qawno/ folder
+  // resolved. Shows an error and returns false if it can't be located.
   bool macCompilePreflight(const QString& pwnFile);
+  // Walk up from a .pwn to the project's qawno/ folder (parent of gamemodes/,
+  // includes/, …); falls back to <pwnDir>/qawno when none is found.
+  static QString projectQawnoDir(const QString& pwnFile);
   // Copy the bundled native pawncc (+ libpawnc.dylib) into the given project's
   // qawno/native/ folder if not already there, creating the folder if missing,
   // so each project carries its own compiler and stays terminal/CI-reusable.

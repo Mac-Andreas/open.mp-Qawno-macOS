@@ -94,7 +94,6 @@ set(SOURCES
   src/AboutDialog.cpp
   src/Compiler.cpp
   src/CompilerSettingsDialog.cpp
-  src/CrossOver.cpp
   src/ServerSettingsDialog.cpp
   src/SettingsDialog.cpp
   src/IosToggle.cpp

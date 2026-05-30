@@ -2,8 +2,8 @@ Qawno · macOS
 =============
 
 A native macOS port of [Qawno](https://github.com/openmultiplayer/qawno), the
-open.mp Pawn editor. Apple Silicon + Intel, dark/light themes, bundled Wine
-download, in-app compiler, native macOS chrome.
+open.mp Pawn editor. Apple Silicon + Intel, dark/light themes, a bundled native
+Pawn compiler (no Wine), and native macOS chrome.
 
 [![Latest release](https://img.shields.io/github/v/release/Mac-Andreas/open.mp-Qawno-macOS?label=download&style=flat-square)](https://github.com/Mac-Andreas/open.mp-Qawno-macOS/releases/latest)
 
@@ -16,7 +16,7 @@ Same Qawno you know, rebuilt for macOS with everything the original couldn't shi
 
 * **Native macOS chrome** — real traffic lights, system window shadow, proper close button, no Win32 emulation.
 * **Dark / Light / System themes** — every panel re-themed top to bottom.
-* **Bundled Wine** — one click downloads + installs Wine into a hidden `.Qawno/` next to the app. No CrossOver licence required.
+* **Native Pawn compiler** — a native `pawncc` ships in the app and compiles directly. No Wine, no CrossOver.
 * **Auto-update Pawn compiler** — Updates tab checks GitHub, downloads, installs.
 * **Per-language syntax themes** — Pawn, C/C++, Python, JavaScript, Rust.
 * **App-wide font picker** — sets menus, sidebar, tab strip. Editor / output keep their own monospace.
@@ -35,9 +35,9 @@ Grab the signed `Qawno.app` from
 
 1. Drag `Qawno.app` to `/Applications` (or anywhere).
 2. Double-click. macOS asks once for Documents access — say yes if your projects live there.
-3. Welcome screen → **Wine** card → **Download Wine** (~180 MB, one-time). Stores into a hidden `.Qawno/` folder next to the `.app`.
+3. Open a `.pwn` and compile — the native compiler is already bundled.
 
-That's it. No Xcode, no CrossOver, no Wine prefix wrangling.
+That's it. No Xcode, no CrossOver, no Wine.
 
 ---
 
@@ -62,7 +62,7 @@ your-project/
 1. **Get pawncc** — Windows release from
    <https://github.com/openmultiplayer/compiler/releases/latest>. Unzip into the project's `qawno/` folder. You only need `pawncc.exe`, `pawnc.dll`, and the `include/` directory.
 2. **Open the project in Qawno** — drag the folder onto `Qawno.app`, or `File → Open` a `.pwn` inside it.
-3. **Compile** — click **Compile** (or `⌘B`). Qawno walks up from the `.pwn` to find the `qawno/` folder, runs `pawncc.exe` under the bundled Wine, and writes the `.amx` beside your `.pwn`.
+3. **Compile** — click **Compile** (or `⌘B`). Qawno walks up from the `.pwn` to find the `qawno/` folder, deploys the native `pawncc` into `qawno/native/`, runs it, and writes the `.amx` beside your `.pwn`.
 
 ### Running the open.mp server with the compiled .amx
 
@@ -95,9 +95,8 @@ Features
 * **Colour picker** (`⌘M`) — native macOS picker
 * **Editing helpers** — `⌘D` duplicate, `⌘⇧D` duplicate selection, `⌘L` delete line, `⌘/` toggle comment, `⌘↑`/`⌘↓` scroll without moving cursor
 * **Compile progress popup** — stays on top, real progress, wrap toggle, recompile button
-* **Welcome page** — recent files + Wine / Pawn compiler / Qawno files status cards
+* **Welcome page** — recent files
 * **Updater** — checks GitHub for new Qawno or pawncc releases (daily background, or on demand)
-* **Self-managed Wine** — installs / uninstalls cleanly, never touches your other Wine setups
 
 ---
 

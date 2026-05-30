@@ -84,7 +84,6 @@
 #include <QStandardPaths>
 #include "ServerSettingsDialog.h"
 #include "SettingsDialog.h"
-#include "CrossOver.h"
 #include "EditorWidget.h"
 #include "FindDialog.h"
 #include "GoToDialog.h"
@@ -2065,7 +2064,7 @@ void MainWindow::runCompile(bool alsoRun) {
   // Deploy the bundled native pawncc into <projectDir>/qawno/native/ so the
   // same compiler is reusable from a terminal/CI, and the project stays
   // self-contained. No Wine/CrossOver is involved.
-  const QString qawnoDir = CrossOver::projectQawnoDir(fileName);
+  const QString qawnoDir = projectQawnoDir(fileName);
   deployNativeCompiler(qawnoDir);
 
   Compiler compiler;
@@ -3996,6 +3995,25 @@ QWidget* MainWindow::buildWelcome() {
   return page;
 }
 
+QString MainWindow::projectQawnoDir(const QString& pwnFile) {
+  if (pwnFile.isEmpty()) {
+    return QString();
+  }
+  // Walk upward from the .pwn looking for a qawno/ folder. Typical open.mp
+  // layouts put it at the project root next to gamemodes/, includes/, … — not
+  // beside every .pwn. Fall back to <pwnDir>/qawno so error messages still
+  // point at a sensible path.
+  QDir d(QFileInfo(pwnFile).absolutePath());
+  for (int i = 0; i < 6; ++i) {
+    const QString candidate = d.absoluteFilePath(QStringLiteral("qawno"));
+    if (QFileInfo(candidate).isDir()) {
+      return candidate;
+    }
+    if (!d.cdUp()) break;
+  }
+  return QFileInfo(pwnFile).absolutePath() + QStringLiteral("/qawno");
+}
+
 void MainWindow::deployNativeCompiler(const QString& qawnoDir) {
   if (qawnoDir.isEmpty()) {
     return;
@@ -4039,7 +4057,7 @@ bool MainWindow::macCompilePreflight(const QString& pwnFile) {
   // qawno/native/ folder — no Wine/CrossOver. The only requirement is that the
   // project has (or can receive) the compiler. deployNativeCompiler handles
   // copying it in; here we just confirm the project's qawno/ folder resolved.
-  const QString qawnoDir = CrossOver::projectQawnoDir(pwnFile);
+  const QString qawnoDir = projectQawnoDir(pwnFile);
   if (qawnoDir.isEmpty()) {
     QMessageBox::warning(
         this, tr("Cannot compile"),
