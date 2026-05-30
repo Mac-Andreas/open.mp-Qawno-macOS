@@ -16,57 +16,25 @@
 #ifndef CROSSOVER_H
 #define CROSSOVER_H
 
-#include <QObject>
 #include <QString>
 #include <QStringList>
 
-// macOS-only helper around CrossOver's bundled Wine. The Pawn compiler
-// (pawncc.exe) is run under CrossOver because the native macOS pawncc emits an
-// AMX P-code format the open.mp server rejects (magic 0xF1E1 vs the expected
-// 0xF1E0). This wraps detection and the one-time creation of a 32-bit bottle.
+// Project compiler-file helpers for the macOS build.
 //
-// Everything is static/stateless: CrossOver state lives on disk, so each call
-// re-reads it rather than caching.
+// Historically this routed compilation through CrossOver's Wine; the macOS
+// build now ships a native pawncc, so only the small path utilities remain.
+// The name is kept to avoid churning call sites.
 class CrossOver {
  public:
-  // The 32-bit bottle this port compiles in. open.mp's toolchain is 32-bit, so
-  // a 64-bit bottle fails with "cannot execute".
-  static const QString kBottle;
-  static const QString kBottleTemplate; // win10
-
-  // CrossOver.app root and the SharedSupport CrossOver dir inside it.
-  static QString appPath();          // "" if not installed
-  static QString cxRoot();           // .../SharedSupport/CrossOver
-  static QString winePath();         // cxRoot/bin/wine ("" if missing)
-  static QString cxBottlePath();     // cxRoot/bin/cxbottle ("" if missing)
-
-  static bool isInstalled();         // CrossOver.app present
-  static QString version();          // CFBundleShortVersionString, e.g. "26.1"
-
-  // Per-user bottles live under ~/Library/Application Support/CrossOver/Bottles.
-  static QString bottlesDir();
-  static QString bottlePath();       // bottlesDir/kBottle
-  static bool bottleExists();        // our Qawno bottle is present
-
-  // Create the 32-bit Qawno bottle (blocking; takes seconds). Returns true on
-  // success; on failure fills *error with cxbottle's output. No-op (true) if
-  // the bottle already exists.
-  static bool createBottle(QString* error = nullptr);
-
-  // Delete the Qawno bottle (for a clean reinstall). Returns true on success
-  // (or if it was already gone); on failure fills *error.
-  static bool deleteBottle(QString* error = nullptr);
-
-  // The compiler files needed at compile time: pawncc.exe + pawnc.dll. These
-  // live in the project's qawno/ subfolder (beside the .pwn file), not beside
-  // Qawno.app — so the app is independent of any one pawncc install.
+  // The native compiler artefacts that live in a project's qawno/native/
+  // folder. pawncc resolves libpawnc.dylib from its own directory.
   static QStringList requiredFiles();         // file names, in display order
 
-  // The qawno/ subfolder beside the input .pwn. Empty if pwnFile is empty.
-  // Doesn't check existence — pair with missingFiles(dir).
+  // Walk up from a .pwn to the project's qawno/ folder (parent of gamemodes/,
+  // includes/, …). Falls back to <pwnDir>/qawno when none is found.
   static QString projectQawnoDir(const QString& pwnFile);
 
-  // requiredFiles() that are absent from the given qawno/ directory.
+  // Of requiredFiles(), which are absent from <qawnoDir>/native/.
   static QStringList missingFiles(const QString& qawnoDir);
 };
 

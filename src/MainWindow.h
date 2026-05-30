@@ -165,14 +165,13 @@ class MainWindow: public QMainWindow {
   void setupCrossOverBottle();
   void reinstallCrossOverBottle();
   // Preflight before compiling on macOS: CrossOver installed, Qawno bottle
-  // present, and the compiler files inside <pwnDir>/qawno/. Shows an error and
-  // returns false if anything is missing.
+  // present, and the project's qawno/ folder. Shows an error and returns false
+  // if it can't be located.
   bool macCompilePreflight(const QString& pwnFile);
-  // Copy the bundled pawn-cc.sh template into the given qawno/ folder (beside
-  // the .pwn) if not already there. Creates the folder if missing — but the
-  // preflight already requires pawncc.exe to be there, so this only fires when
-  // the user has the compiler files in place.
-  void deployPawnScript(const QString& qawnoDir);
+  // Copy the bundled native pawncc (+ libpawnc.dylib) into the given project's
+  // qawno/native/ folder if not already there, creating the folder if missing,
+  // so each project carries its own compiler and stays terminal/CI-reusable.
+  void deployNativeCompiler(const QString& qawnoDir);
   void refreshRecents();
   void updateWelcomeVisibility();
   void addRecentFile(const QString& path);

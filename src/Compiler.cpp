@@ -24,14 +24,18 @@
 
 Compiler::Compiler() {
   QSettings settings;
-  // Default compiler path: pawn-cc.sh wrapper deployed into the project's
-  // qawno/ subfolder (beside the .pwn). The wrapper auto-discovers pawncc.exe
-  // in its own directory, so keeping it inside qawno/ next to pawncc.exe makes
-  // the project self-contained — Qawno.app doesn't need to ship pawncc.
-  const QString kDefaultPath = "%p/qawno/pawn-cc.sh";
+  // Default compiler path: the native pawncc deployed into the project's
+  // qawno/native/ subfolder. The native compiler runs directly on macOS
+  // (Apple Silicon / Intel) and emits open.mp-compatible AMX (magic 0xF1E0),
+  // so no Wine/CrossOver is involved in compiling.
+  const QString kDefaultPath = "%p/qawno/native/pawncc";
+  // Legacy Wine wrappers we transparently migrate away from.
+  const QStringList kLegacyWinePaths = {
+      "./run-pawncc-wine.sh", "%p/pawn-cc.sh", "%p/qawno/pawn-cc.sh",
+      "%p/qawno/run-pawncc-wine.sh"};
   path_ = settings.value("CompilerPath", kDefaultPath).toString();
-  // Migrate older defaults to the qawno/ subfolder layout.
-  if (path_ == "./run-pawncc-wine.sh" || path_ == "%p/pawn-cc.sh") {
+  // Migrate older Wine-based defaults to the native compiler.
+  if (kLegacyWinePaths.contains(path_)) {
     path_ = kDefaultPath;
     settings.setValue("CompilerPath", path_);
   }

@@ -21,7 +21,7 @@
 #include <QStandardPaths>
 
 namespace {
-constexpr const char* kCompilerRepo = "openmultiplayer/compiler";
+constexpr const char* kCompilerRepo = "pawn-lang/compiler";
 constexpr const char* kQawnoRepo    = "Mac-Andreas/open.mp-Qawno-Silicon";
 constexpr const char* kWineRepo     = "Gcenx/macOS_Wine_builds";
 
@@ -66,7 +66,7 @@ QString UpdateChecker::repoFor(Component which) const {
 void UpdateChecker::checkAll() {
   check(Component::Compiler);
   check(Component::Qawno);
-  check(Component::Wine);
+  // Wine is no longer used (native compiler); don't poll the Wine builds repo.
 }
 
 void UpdateChecker::check(Component which) {

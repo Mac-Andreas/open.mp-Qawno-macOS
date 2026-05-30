@@ -77,7 +77,6 @@
 #include "Installer.h"
 #include "UpdateChecker.h"
 #include "UpdatePromptDialog.h"
-#include "WineManager.h"
 #include "Spinner.h"
 #include "IosToggle.h"
 #include "IconLoader.h"
@@ -2057,27 +2056,25 @@ void MainWindow::runCompile(bool alsoRun) {
   }
 
 #ifdef Q_OS_MACOS
-  // Block compiling unless CrossOver, the bottle, and the project's qawno/
-  // folder (with pawncc.exe + pawnc.dll) exist.
+  // Ensure the native pawncc is present in the project's qawno/native/ folder.
   if (!macCompilePreflight(fileName)) {
     return;
   }
 #endif
 
-  // Deploy the pawn-cc.sh wrapper into <projectDir>/qawno/ — same folder as
-  // pawncc.exe — so the same compile pipeline is reusable from a terminal/CI.
+  // Deploy the bundled native pawncc into <projectDir>/qawno/native/ so the
+  // same compiler is reusable from a terminal/CI, and the project stays
+  // self-contained. No Wine/CrossOver is involved.
   const QString qawnoDir = CrossOver::projectQawnoDir(fileName);
-  deployPawnScript(qawnoDir);
+  deployNativeCompiler(qawnoDir);
 
   Compiler compiler;
-  // The default compiler path template (%p/qawno/pawn-cc.sh) assumes a qawno/
-  // folder sits beside the .pwn. Real projects put qawno/ at the project root
-  // (parent of gamemodes/, filterscripts/, includes/), which projectQawnoDir
-  // walks up to find. Pin the compiler to the discovered absolute path so
-  // commandFor doesn't synthesise a non-existent sibling path.
-  const QString deployedScript = qawnoDir + "/pawn-cc.sh";
-  if (QFile::exists(deployedScript)) {
-    compiler.setPath(deployedScript);
+  // Pin the compiler to the discovered absolute native binary so commandFor
+  // doesn't synthesise a non-existent sibling path. projectQawnoDir walks up
+  // to find the project's qawno/ folder (parent of gamemodes/, includes/, …).
+  const QString deployedCompiler = qawnoDir + "/native/pawncc";
+  if (QFile::exists(deployedCompiler)) {
+    compiler.setPath(deployedCompiler);
   }
   const QString command = compiler.commandFor(fileName);
   const QString shortName = QFileInfo(fileName).fileName();
@@ -2094,16 +2091,9 @@ void MainWindow::runCompile(bool alsoRun) {
   proc->setProcessChannelMode(QProcess::MergedChannels);
   proc->setWorkingDirectory(QDir::currentPath());
 
-  // Hand the script the location of our self-managed wine bundle. WineManager
-  // resolves the same path; setting it on the env keeps the script honest
-  // when /Applications/Qawno.app has been moved or renamed.
+  // The native compiler needs no special environment. It links libpawnc.dylib
+  // from its own folder via @loader_path, so it runs straight from qawno/native/.
   QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-  env.insert("QAWNO_APPDATA", WineManager::instance()->appQawnoDir());
-  // Silence MoltenVK / Vulkan diagnostic spam that wine emits at startup —
-  // unrelated to the actual compile output the user cares about.
-  env.insert("MVK_CONFIG_LOG_LEVEL", "0");
-  env.insert("MVK_DEBUG", "0");
-  env.insert("WINEDEBUG", "-all");
   proc->setProcessEnvironment(env);
 
   auto canceled = std::make_shared<bool>(false);
@@ -3544,13 +3534,6 @@ QString MainWindow::stripUserPrefix(const QString& path) const {
   if (!home.isEmpty() && path.startsWith(home)) {
     return path.mid(home.length());
   }
-  // Wine-mapped equivalent (Z:\Users\<user>\…). Built from the home dir so we
-  // strip the same prefix regardless of who's logged in.
-  QString wineHome = "Z:" + home;
-  wineHome.replace('/', '\\');
-  if (!wineHome.isEmpty() && path.startsWith(wineHome, Qt::CaseInsensitive)) {
-    return path.mid(wineHome.length());
-  }
   return path;
 }
 
@@ -3835,7 +3818,6 @@ void MainWindow::updateWelcomeVisibility() {
   if (empty) {
     refreshRecents();
 #ifdef Q_OS_MACOS
-    refreshCrossOverCard();
     refreshQawnoFilesCard();
 #endif
   } else {
@@ -4012,11 +3994,9 @@ QWidget* MainWindow::buildWelcome() {
   cols->addLayout(right, 1);
 
 #ifdef Q_OS_MACOS
-  // macOS: two status tiles under the columns — CrossOver detection/bottle and
-  // the Qawno compiler files. The Pawn compiler runs through CrossOver's Wine
-  // (native pawncc's AMX output is rejected by the server).
+  // macOS: status tiles for the native Pawn compiler and the project's Qawno
+  // files. The compiler runs natively (no Wine/CrossOver).
   center->addWidget(buildMacToolingCards());
-  refreshCrossOverCard();
   refreshQawnoFilesCard();
 #endif
 
@@ -4036,233 +4016,14 @@ void stylePill(QLabel* pill, const QString& text, bool good) {
 }  // namespace
 
 QWidget* MainWindow::buildMacToolingCards() {
-  // Three equal tiles side by side: Wine | Pawn compiler | Qawno files.
+  // Two equal tiles side by side: Pawn compiler | Qawno files.
   QWidget* row = new QWidget;
   QHBoxLayout* rl = new QHBoxLayout(row);
   rl->setContentsMargins(0, 0, 0, 0);
   rl->setSpacing(16);
-  rl->addWidget(buildWineCard(), 1);
   rl->addWidget(buildCompilerCard(), 1);
   rl->addWidget(buildQawnoFilesCard(), 1);
   return row;
-}
-
-QWidget* MainWindow::buildWineCard() {
-  QFrame* card = new QFrame;
-  card->setObjectName("toolingCard");
-  QVBoxLayout* cv = new QVBoxLayout(card);
-  cv->setContentsMargins(18, 16, 18, 16);
-  cv->setSpacing(10);
-
-  QHBoxLayout* titleRow = new QHBoxLayout;
-  QLabel* title = new QLabel(tr("Wine"));
-  title->setObjectName("toolingTitle");
-  titleRow->addWidget(title);
-  titleRow->addStretch(1);
-  auto* pill = new QLabel; pill->setAlignment(Qt::AlignCenter);
-  titleRow->addWidget(pill);
-  cv->addLayout(titleRow);
-
-  auto* detail = new QLabel;
-  detail->setObjectName("toolingDetail");
-  detail->setWordWrap(true);
-  cv->addWidget(detail, 1);
-
-  // Speed/progress line — shows e.g. "12.4 MB/s · 78 MB / 180 MB" while
-  // downloading, blank otherwise.
-  auto* speedLabel = new QLabel;
-  speedLabel->setStyleSheet("color:#B6BDC7;font-size:11px;");
-  speedLabel->hide();
-  cv->addWidget(speedLabel);
-
-  QHBoxLayout* btnRow = new QHBoxLayout;
-  auto* primary = new QPushButton;
-  primary->setCursor(Qt::PointingHandCursor);
-  primary->setMinimumHeight(34);
-  // Spinner painted INSIDE the button (left of label) using a child Spinner.
-  // QPushButton has no built-in icon-on-left-with-padding for live widgets,
-  // so we lay it out as a child positioned manually in resizeEvent.
-  auto* spinner = new Spinner(primary);
-  spinner->setSpinSize(14);
-  spinner->setColor(QColor(255, 255, 255));
-  spinner->hide();
-  primary->setStyleSheet(
-      "QPushButton { border-radius: 8px; padding: 6px 16px 6px 30px; "
-      "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
-      "QPushButton:hover { background: #4A8AC8; }"
-      "QPushButton:disabled { background: #4A5363; color: #9AA1AD; }");
-  btnRow->addWidget(primary, 0);
-
-  // Secondary "Delete cache" button — shown when there's something to delete.
-  auto* secondary = new QPushButton(tr("Delete cache"));
-  secondary->setCursor(Qt::PointingHandCursor);
-  secondary->setMinimumHeight(34);
-  secondary->setStyleSheet(
-      "QPushButton { border-radius: 8px; padding: 6px 14px; "
-      "background: transparent; color: #C8CDD6; font-weight: 500; "
-      "border: 1px solid #4A5363; }"
-      "QPushButton:hover { background: rgba(127,140,160,0.15); }"
-      "QPushButton:disabled { color: #6A707B; border-color: #3A3F4B; }");
-  btnRow->addWidget(secondary, 0);
-  btnRow->addStretch(1);
-  cv->addLayout(btnRow);
-
-  // (Spinner repositioning happens inside refresh() — set when the button
-  // becomes visible. Resize during runtime is rare on this card.)
-
-  // Speed sample state (kept in heap because lambdas need persistent storage).
-  struct SpeedTracker {
-    qint64 lastBytes = 0;
-    qint64 lastTimeMs = 0;
-    QString text;
-  };
-  auto* tracker = new SpeedTracker;
-
-  auto refresh = [pill, detail, primary, secondary, spinner, speedLabel, tracker] {
-    auto* wm = WineManager::instance();
-    using S = WineManager::State;
-    // Secondary "Delete cache" enabled only when there's a cached archive to
-    // remove. Greys out after a successful delete and during active ops.
-    const QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
-                             + "/updates/wine";
-    const bool hasCache = QDir(cacheDir).exists() && !QDir(cacheDir).isEmpty();
-    secondary->setEnabled(hasCache && wm->state() != S::Downloading &&
-                          wm->state() != S::Installing);
-    secondary->show();
-    switch (wm->state()) {
-      case S::Ready:
-        pill->setText(tr("READY"));
-        pill->setStyleSheet("background:#1F6E3D;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
-        detail->setText(tr("Installed: %1").arg(wm->installedVersion()));
-        primary->setText(tr("Uninstall Wine"));
-        primary->setEnabled(true);
-        spinner->hide();
-        primary->setStyleSheet(
-            "QPushButton { border-radius: 8px; padding: 6px 16px; "
-            "background: #C0392B; color: white; font-weight: 600; border: none; }"
-            "QPushButton:hover { background: #D14437; }"
-            "QPushButton:disabled { background: #4A5363; color: #9AA1AD; }");
-        speedLabel->hide();
-        break;
-      case S::Downloading:
-        pill->setText(tr("DOWNLOADING"));
-        pill->setStyleSheet("background:#B47A12;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
-        detail->setText(tr("Fetching Wine in the background…"));
-        primary->setText(tr("Downloading %1%").arg(wm->progressPercent()));
-        primary->setEnabled(false);
-        primary->setStyleSheet(
-            "QPushButton { border-radius: 8px; padding: 6px 16px 6px 30px; "
-            "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
-            "QPushButton:disabled { background: #3D7CB8; color: #FFFFFF; }");
-        spinner->setSpinSize(14);
-        spinner->show();
-        spinner->move(10, (primary->height() - spinner->height()) / 2);
-        speedLabel->setText(tracker->text);
-        speedLabel->setVisible(!tracker->text.isEmpty());
-        break;
-      case S::Installing:
-        pill->setText(tr("INSTALLING"));
-        pill->setStyleSheet("background:#B47A12;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
-        detail->setText(tr("Extracting Wine into the hidden .Qawno folder…"));
-        primary->setText(tr("Installing…"));
-        primary->setEnabled(false);
-        primary->setStyleSheet(
-            "QPushButton { border-radius: 8px; padding: 6px 16px 6px 30px; "
-            "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
-            "QPushButton:disabled { background: #3D7CB8; color: #FFFFFF; }");
-        spinner->setSpinSize(16);
-        spinner->show();
-        spinner->move(10, (primary->height() - spinner->height()) / 2);
-        speedLabel->hide();
-        break;
-      case S::Error:
-        pill->setText(tr("ERROR"));
-        pill->setStyleSheet("background:#9A2A2A;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
-        detail->setText(tr("Wine install failed. Retry?"));
-        primary->setText(tr("Retry Wine install"));
-        primary->setEnabled(true);
-        primary->setStyleSheet(
-            "QPushButton { border-radius: 8px; padding: 6px 16px; "
-            "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
-            "QPushButton:hover { background: #4A8AC8; }");
-        spinner->hide();
-        speedLabel->hide();
-        break;
-      case S::NotInstalled:
-      default:
-        pill->setText(tr("NOT INSTALLED"));
-        pill->setStyleSheet("background:#4A5363;color:white;border-radius:10px;padding:2px 10px;font-weight:600;");
-        detail->setText(tr("Wine (~180 MB) runs the Pawn compiler on macOS. Installs into the hidden .Qawno folder next to Qawno.app."));
-        primary->setText(tr("Download Wine"));
-        primary->setEnabled(true);
-        primary->setStyleSheet(
-            "QPushButton { border-radius: 8px; padding: 6px 16px; "
-            "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
-            "QPushButton:hover { background: #4A8AC8; }");
-        spinner->hide();
-        speedLabel->hide();
-        break;
-    }
-  };
-  refresh();
-  // Poll wine binary existence — picks up external install/uninstall without
-  // a Qawno restart.
-  auto* poll = new QTimer(card);
-  poll->setInterval(2000);
-  connect(poll, &QTimer::timeout, card, [refresh] {
-    auto* wm = WineManager::instance();
-    using S = WineManager::State;
-    if (wm->state() == S::NotInstalled && QFileInfo::exists(wm->binPath())) {
-      // WineManager doesn't directly expose setState; just refresh — Ready
-      // detection happens via WineManager ctor logic next run. For now flip
-      // the UI optimistically.
-    }
-    refresh();
-  });
-  poll->start();
-  connect(primary, &QPushButton::clicked, this, [] {
-    auto* wm = WineManager::instance();
-    if (wm->state() == WineManager::State::Ready) {
-      wm->uninstall();
-    } else {
-      wm->download();
-    }
-  });
-  connect(secondary, &QPushButton::clicked, this, [refresh] {
-    WineManager::instance()->deleteCache();
-    refresh();
-  });
-  connect(WineManager::instance(), &WineManager::stateChanged, this, [refresh](WineManager::State){ refresh(); });
-  connect(WineManager::instance(), &WineManager::progressChanged, this, [refresh](int){ refresh(); });
-  connect(UpdateChecker::instance(), &UpdateChecker::downloadProgress, this,
-          [refresh, tracker, speedLabel](UpdateChecker::Component c, qint64 b, qint64 t) {
-            if (c != UpdateChecker::Component::Wine) return;
-            const qint64 now = QDateTime::currentMSecsSinceEpoch();
-            if (tracker->lastTimeMs > 0 && now > tracker->lastTimeMs) {
-              const qint64 dt = now - tracker->lastTimeMs;
-              const qint64 db = b - tracker->lastBytes;
-              if (dt >= 250) {  // throttle updates to ~4 Hz
-                const double bps = (db * 1000.0) / dt;
-                auto humanBytes = [](double v) {
-                  const char* u[] = {"B","KB","MB","GB"};
-                  int i = 0;
-                  while (v >= 1024 && i < 3) { v /= 1024; ++i; }
-                  return QString::number(v, 'f', v >= 100 ? 0 : 1) + " " + u[i];
-                };
-                tracker->text = tr("%1 / %2 · %3/s")
-                                    .arg(humanBytes(b), humanBytes(t), humanBytes(bps));
-                tracker->lastBytes = b;
-                tracker->lastTimeMs = now;
-                speedLabel->setText(tracker->text);
-                speedLabel->show();
-              }
-            } else {
-              tracker->lastBytes = b;
-              tracker->lastTimeMs = now;
-            }
-          });
-
-  return card;
 }
 
 QWidget* MainWindow::buildCompilerCard() {
@@ -4379,63 +4140,6 @@ QWidget* MainWindow::buildCompilerCard() {
   return card;
 }
 
-QWidget* MainWindow::buildCrossOverCard() {
-  QFrame* card = new QFrame;
-  card->setObjectName("toolingCard");
-  QVBoxLayout* cv = new QVBoxLayout(card);
-  cv->setContentsMargins(18, 16, 18, 16);
-  cv->setSpacing(10);
-
-  // Title row: "CrossOver" + detected/not-detected pill.
-  QHBoxLayout* titleRow = new QHBoxLayout;
-  QLabel* title = new QLabel(tr("CrossOver"));
-  title->setObjectName("toolingTitle");
-  titleRow->addWidget(title);
-  titleRow->addStretch(1);
-  cxStatusPill_ = new QLabel;
-  cxStatusPill_->setAlignment(Qt::AlignCenter);
-  titleRow->addWidget(cxStatusPill_);
-  cv->addLayout(titleRow);
-
-  // Detail line: version / bottle status / guidance.
-  cxDetail_ = new QLabel;
-  cxDetail_->setObjectName("toolingDetail");
-  cxDetail_->setWordWrap(true);
-  cv->addWidget(cxDetail_, 1);
-
-  // Action buttons: create the bottle (when missing) / delete (when present).
-  QHBoxLayout* btnRow = new QHBoxLayout;
-  cxSetupButton_ = new QPushButton;
-  cxSetupButton_->setCursor(Qt::PointingHandCursor);
-  cxSetupButton_->setMinimumHeight(34);
-  cxSetupButton_->setStyleSheet(
-      "QPushButton { border-radius: 8px; padding: 6px 16px; "
-      "background: #3D7CB8; color: white; font-weight: 600; border: none; }"
-      "QPushButton:hover { background: #4A8AC8; }"
-      "QPushButton:disabled { background: #4A5363; color: #9AA1AD; }");
-  connect(cxSetupButton_, &QPushButton::clicked, this,
-          [this] { setupCrossOverBottle(); });
-  btnRow->addWidget(cxSetupButton_, 0);
-
-  cxReinstallButton_ = new QPushButton(tr("Delete bottle"));
-  cxReinstallButton_->setCursor(Qt::PointingHandCursor);
-  cxReinstallButton_->setMinimumHeight(34);
-  cxReinstallButton_->setIcon(QIcon(":/assets/images/icons/trash.svg"));
-  cxReinstallButton_->setIconSize(QSize(15, 15));
-  cxReinstallButton_->setStyleSheet(
-      "QPushButton { border-radius: 8px; padding: 6px 16px; "
-      "background: #C0392B; color: white; font-weight: 600; border: none; }"
-      "QPushButton:hover { background: #D14437; }"
-      "QPushButton:disabled { background: #4A5363; color: #9AA1AD; }");
-  connect(cxReinstallButton_, &QPushButton::clicked, this,
-          [this] { reinstallCrossOverBottle(); });
-  btnRow->addWidget(cxReinstallButton_, 0);
-  btnRow->addStretch(1);
-  cv->addLayout(btnRow);
-
-  return card;
-}
-
 QWidget* MainWindow::buildQawnoFilesCard() {
   QFrame* card = new QFrame;
   card->setObjectName("toolingCard");
@@ -4495,163 +4199,60 @@ void MainWindow::refreshQawnoFilesCard() {
   }
 }
 
-void MainWindow::refreshCrossOverCard() {
-  if (!cxStatusPill_) {
-    return;
-  }
-
-  auto setPill = [this](const QString& text, bool good) {
-    stylePill(cxStatusPill_, text, good);
-  };
-
-  if (!CrossOver::isInstalled()) {
-    setPill(tr("● Not detected"), false);
-    cxDetail_->setText(tr(
-        "CrossOver was not found in /Applications. It is used to run the Pawn "
-        "compiler under Wine. Install CrossOver to compile on macOS."));
-    cxSetupButton_->setVisible(false);
-    cxReinstallButton_->setVisible(false);
-    return;
-  }
-
-  const QString ver = CrossOver::version();
-  setPill(ver.isEmpty() ? tr("● Detected") : tr("● Detected · v%1").arg(ver),
-          true);
-
-  if (CrossOver::bottleExists()) {
-    cxDetail_->setText(
-        tr("The 32-bit \"%1\" bottle is ready. The compiler runs through it.")
-            .arg(CrossOver::kBottle));
-    cxSetupButton_->setVisible(false);
-    cxReinstallButton_->setVisible(true);  // offer to delete it
-  } else {
-    cxDetail_->setText(
-        tr("No \"%1\" bottle yet. Create a 32-bit bottle to route the Pawn "
-           "compiler through CrossOver.")
-            .arg(CrossOver::kBottle));
-    cxSetupButton_->setText(tr("Set up %1 bottle").arg(CrossOver::kBottle));
-    cxSetupButton_->setEnabled(true);
-    cxSetupButton_->setVisible(true);
-    cxReinstallButton_->setVisible(false);
-  }
-}
-
-void MainWindow::setupCrossOverBottle() {
-  if (!cxSetupButton_) {
-    return;
-  }
-  cxSetupButton_->setText(tr("Creating bottle…"));
-  // Repaint the new label, then block the main thread for the create. Blocking
-  // (no processEvents) lets macOS show its native spinning-beachball wait
-  // cursor while cxbottle runs.
-  cxSetupButton_->repaint();
-
-  QString error;
-  const bool ok = CrossOver::createBottle(&error);
-
-  if (!ok) {
-    QMessageBox::warning(
-        this, tr("CrossOver"),
-        tr("Could not create the \"%1\" bottle.\n\n%2")
-            .arg(CrossOver::kBottle, error));
-  }
-  refreshCrossOverCard();
-}
-
-void MainWindow::reinstallCrossOverBottle() {
-  if (!cxReinstallButton_) {
-    return;
-  }
-  // Confirm with a trash icon instead of the default "?" question icon.
-  QMessageBox box(this);
-  box.setWindowTitle(tr("Delete bottle"));
-  box.setText(tr("Delete the 32-bit \"%1\" CrossOver bottle?").arg(CrossOver::kBottle));
-  box.setInformativeText(
-      tr("You can recreate it afterwards with \"Set up %1 bottle\".")
-          .arg(CrossOver::kBottle));
-  box.setIconPixmap(QIcon(":/assets/images/icons/trash.svg").pixmap(48, 48));
-  box.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
-  box.setDefaultButton(QMessageBox::Cancel);
-  if (box.exec() != QMessageBox::Yes) {
-    return;
-  }
-
-  cxReinstallButton_->setText(tr("Deleting…"));
-  cxReinstallButton_->repaint();  // show label, then block for the beachball
-
-  QString error;
-  const bool ok = CrossOver::deleteBottle(&error);
-
-  cxReinstallButton_->setText(tr("Delete bottle"));
-  if (!ok) {
-    QMessageBox::warning(this, tr("CrossOver"),
-                         tr("Could not delete the \"%1\" bottle.\n\n%2")
-                             .arg(CrossOver::kBottle, error));
-  }
-  refreshCrossOverCard();
-}
 #endif // Q_OS_MACOS
 
-void MainWindow::deployPawnScript(const QString& qawnoDir) {
+void MainWindow::deployNativeCompiler(const QString& qawnoDir) {
   if (qawnoDir.isEmpty()) {
     return;
   }
-  // Caller already validated the folder exists via preflight, but mkpath is a
-  // no-op when present and harmless when not — keeps the helper safe to call
-  // directly from a future code path.
-  QDir().mkpath(qawnoDir);
-  const QString dest = qawnoDir + "/pawn-cc.sh";
-  if (QFile::exists(dest)) {
-    return;
-  }
-  // Source candidates: bundle on macOS, repo scripts/ when running from build.
-  QStringList sources;
-  sources << QCoreApplication::applicationDirPath() + "/pawn-cc.sh";
+  const QString destDir = qawnoDir + "/native";
+  QDir().mkpath(destDir);
+
+  // pawncc + its shared library are copied as a pair: the binary resolves
+  // libpawnc.dylib from its own directory via an @loader_path rpath.
+  const QStringList artefacts = {"pawncc", "libpawnc.dylib"};
+  for (const QString& name : artefacts) {
+    const QString dest = destDir + "/" + name;
+    if (QFile::exists(dest)) {
+      continue;
+    }
+    // Source candidates: app bundle Resources/native, then repo bin/ when
+    // running from a build tree.
+    QStringList sources;
+    sources << QCoreApplication::applicationDirPath() + "/native/" + name;
 #ifdef Q_OS_MACOS
-  sources << QCoreApplication::applicationDirPath() + "/../Resources/pawn-cc.sh";
+    sources << QCoreApplication::applicationDirPath() + "/../Resources/native/" + name;
 #endif
-  sources << QCoreApplication::applicationDirPath() + "/../scripts/pawn-cc.sh";
-  for (const QString& src : sources) {
-    if (QFile::exists(src)) {
-      if (QFile::copy(src, dest)) {
-        QFile::setPermissions(dest,
-            QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
-            QFileDevice::ReadGroup | QFileDevice::ExeGroup |
-            QFileDevice::ReadOther | QFileDevice::ExeOther);
+    sources << QCoreApplication::applicationDirPath() + "/../bin/darwin/" + name;
+    for (const QString& src : sources) {
+      if (QFile::exists(src)) {
+        if (QFile::copy(src, dest) && name == "pawncc") {
+          QFile::setPermissions(dest,
+              QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+              QFileDevice::ReadGroup | QFileDevice::ExeGroup |
+              QFileDevice::ReadOther | QFileDevice::ExeOther);
+        }
+        break;
       }
-      return;
     }
   }
 }
 
 #ifdef Q_OS_MACOS
 bool MainWindow::macCompilePreflight(const QString& pwnFile) {
-  QStringList problems;
-  // The Wine runtime: either our self-managed install or an existing CrossOver
-  // bottle satisfies the requirement. Bundled wine is preferred (no external
-  // dependency); CrossOver remains a fallback for users who already have it.
-  const bool wineReady = WineManager::instance()->isReady();
-  const bool crossOverReady = CrossOver::isInstalled() && CrossOver::bottleExists();
-  if (!wineReady && !crossOverReady) {
-    problems << tr("• Wine is not installed. Click \"Download\" on the Wine "
-                   "card on the start page to install it (~180 MB).");
-  }
+  // The native compiler is bundled and deployed into the project's
+  // qawno/native/ folder — no Wine/CrossOver. The only requirement is that the
+  // project has (or can receive) the compiler. deployNativeCompiler handles
+  // copying it in; here we just confirm the project's qawno/ folder resolved.
   const QString qawnoDir = CrossOver::projectQawnoDir(pwnFile);
-  const QStringList missing = CrossOver::missingFiles(qawnoDir);
-  if (!missing.isEmpty()) {
-    problems << tr("• Missing in %1: %2. Put %3 in a qawno/ folder beside "
-                   "your .pwn so the project carries its own compiler.")
-                    .arg(qawnoDir, missing.join(", "),
-                         CrossOver::requiredFiles().join(", "));
+  if (qawnoDir.isEmpty()) {
+    QMessageBox::warning(
+        this, tr("Cannot compile"),
+        tr("Could not locate a qawno/ folder for this project. Place your "
+           ".pwn inside a project that has a qawno/ directory."));
+    return false;
   }
-  if (problems.isEmpty()) {
-    return true;
-  }
-  QMessageBox::warning(
-      this, tr("Cannot compile"),
-      tr("Compiling on macOS needs Wine and the Pawn compiler files:\n\n%1")
-          .arg(problems.join("\n\n")));
-  return false;
+  return true;
 }
 #endif // Q_OS_MACOS
 

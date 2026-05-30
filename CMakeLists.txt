@@ -83,7 +83,6 @@ set(HEADERS
   src/UpdateChecker.h
   src/UpdatePromptDialog.h
   src/Installer.h
-  src/WineManager.h
   src/Spinner.h
   src/IconLoader.h
   src/LocaleManager.h
@@ -111,7 +110,6 @@ set(SOURCES
   src/UpdateChecker.cpp
   src/UpdatePromptDialog.cpp
   src/Installer.cpp
-  src/WineManager.cpp
   src/Spinner.cpp
   src/IconLoader.cpp
   src/LocaleManager.cpp
@@ -301,13 +299,19 @@ endif()
 if(APPLE)
   set_target_properties(qawno PROPERTIES OUTPUT_NAME Qawno)
 
-  # Bundle pawn-cc.sh template into Qawno.app/Contents/Resources/ at build time
-  # so Qawno can deploy a copy into the user's project folder on compile.
+  # Bundle the native pawncc (+ libpawnc.dylib) into
+  # Qawno.app/Contents/Resources/native/ at build time so Qawno can deploy a
+  # copy into the user's project qawno/native/ folder on compile. No Wine.
   add_custom_command(TARGET qawno POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+      "$<TARGET_FILE_DIR:qawno>/../Resources/native"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${CMAKE_CURRENT_SOURCE_DIR}/scripts/pawn-cc.sh"
-      "$<TARGET_FILE_DIR:qawno>/../Resources/pawn-cc.sh"
-    COMMENT "Bundling pawn-cc.sh template"
+      "${CMAKE_CURRENT_SOURCE_DIR}/bin/darwin/pawncc"
+      "$<TARGET_FILE_DIR:qawno>/../Resources/native/pawncc"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/bin/darwin/libpawnc.dylib"
+      "$<TARGET_FILE_DIR:qawno>/../Resources/native/libpawnc.dylib"
+    COMMENT "Bundling native pawncc compiler"
   )
 
   find_program(MACDEPLOYQT_EXECUTABLE macdeployqt HINTS "${QT5_BIN_DIR}")
